@@ -10,10 +10,18 @@ from pipeline.schema.enums import (
 )
 from pipeline.schema.identity import NATURAL_KEY_FIELDS, natural_key, observation_id
 from pipeline.schema.record import SCHEMA_VERSION, FareObservation, build_observation
+from pipeline.schema.validation import (
+    BatchReport,
+    Violation,
+    ViolationCode,
+    validate,
+    validate_batch,
+)
 
 __all__ = [
     "NATURAL_KEY_FIELDS",
     "SCHEMA_VERSION",
+    "BatchReport",
     "Cabin",
     "DataQuality",
     "FareObservation",
@@ -21,7 +29,11 @@ __all__ = [
     "QualityFlag",
     "Source",
     "TripType",
+    "Violation",
+    "ViolationCode",
     "build_observation",
     "natural_key",
     "observation_id",
+    "validate",
+    "validate_batch",
 ]
