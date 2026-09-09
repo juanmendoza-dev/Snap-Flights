@@ -361,9 +361,22 @@ def table_to_records(table: pa.Table) -> list[FareObservation]:
     """Inverse. Raises on a schema mismatch rather than coercing."""
 ```
 
-Partition columns (`source`, `route_key`, `fetched_date`) are Hive-encoded in the path
-**and** kept as columns in the file. Redundant on disk, but it makes a single part file
-self-describing and lets `read()` fall back to a plain file scan.
+`source` and `route_key` are Hive-encoded in the path **and** kept as columns in the file.
+Redundant on disk, but it makes a single part file self-describing and lets `read()` fall
+back to a plain file scan.
+
+`fetched_date` is a **path segment only**. It is not in the schema above, because L0 §3 has
+no such field: it is the UTC calendar date of `fetched_at` and is derived, never stored. A
+query filtering on it computes `CAST(fetched_at AS DATE)` with the connection's `TimeZone`
+set to `UTC` — that cast is session-timezone dependent, and `fetched_date` is defined in UTC
+(L0 §6).
+
+Because the two partition columns are also real columns, every scan runs with
+**`hive_partitioning = 0`**. With Hive inference on, DuckDB and pyarrow re-derive `source`
+and `route_key` from the path as dictionary-typed columns and collide with the file's own
+string columns (`Unable to merge: Field source has incompatible types: string vs
+dictionary`). Keeping the columns in the file is the decision that makes inference redundant,
+so it is turned off rather than worked around.
 
 ### 2.6 `shared/settings.py` — the single fixture-mode reader
 
@@ -510,7 +523,7 @@ def part_path(root: Path, *, source: str, route_key: str, fetched_date: date,
 
 def scan_glob(root: Path) -> str:
     """{root}/source=*/route_key=*/fetched_date=*/part-*.parquet — the DuckDB read_parquet
-    argument, with hive_partitioning=1."""
+    argument, with hive_partitioning=0 (the partition columns are in the file; see §2.5)."""
 ```
 
 ## 3. Config file schemas
@@ -935,3 +948,15 @@ is SF-06's `latest_observed_price()`.
 Push after each. Commit 7's test file path is `tests/store/test_fixture_mode.py`. Commits 1–5
 are pure-Python and fast to review; 8 is the only one with a large binary in the diff, kept
 alone on purpose.
+
+Two ordering consequences, stated so they are not rediscovered as bugs:
+
+- `build_observation()` needs `observation_id()`, so it lands with commit 2 rather than
+  commit 1. Commit 1 ships the model and its enums; a commit 1 that imported
+  `pipeline.schema.identity` would not run.
+- **Commit 8 leaves CI red until commit 9 lands.** It commits
+  `data/fixtures/fare_observations.parquet` while `scripts/validate_fixtures.py` is still
+  P0's skeleton, and that skeleton raises `NotImplementedError` as soon as the file it
+  guards on exists. The CI step P0 wired therefore fails on commit 8 and passes again on
+  commit 9. Keeping the binary alone in its own commit is worth one transient red; a future
+  spec of this shape should land the validator body *before* the data it validates.
