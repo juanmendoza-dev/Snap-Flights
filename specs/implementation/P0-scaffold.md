@@ -89,7 +89,7 @@ package = false
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["data"]
+extend-exclude = ["data", "specs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
@@ -102,6 +102,13 @@ markers = [
     "slow: takes more than a second (fixture regeneration, backtest)",
 ]
 ```
+
+`specs` is excluded from ruff for the same reason `data` is: neither holds project code.
+Ruff formats Python code blocks inside Markdown, and the build specs are full of illustrative
+snippets — elided bodies, hand-wrapped signatures — that are written to be read, not to be
+formatted. Without the exclusion `ruff format --check .` fails on prose, which would make the
+quality gate a reason to reword a spec. (Behaviour observed on ruff 0.16.6; the pin
+`ruff>=0.6,<1` predates Markdown formatting.)
 
 `pyarrow` is pinned to a single minor (`>=17.0,<18`) on purpose: the fixture Parquet file is
 byte-identity-tested (SF-03-build §5) and the writer version is embedded in the file's
