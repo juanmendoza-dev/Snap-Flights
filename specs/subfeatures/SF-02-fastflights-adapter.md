@@ -12,6 +12,7 @@ priority routes/dates.
 
 - SF-03.
 - L0 §5 adapter contract.
+- Stack (decision 0001): Python.
 - The `fast-flights` library (`AWeirdDev/flights` on GitHub) as a dependency — pin a version.
 
 ## Files owned

@@ -11,6 +11,7 @@ API and emits canonical `calendar_cheapest` fare observations.
 
 - SF-03 (schema + store interfaces).
 - L0 §5 adapter contract.
+- Stack (decision 0001): Python; `httpx` for requests, `uv` for deps.
 - A free Travelpayouts affiliate account + API token (manual, one-time; document the steps
   in the adapter README). Token via env `TRAVELPAYOUTS_TOKEN`.
 

@@ -36,7 +36,7 @@ and every claim it makes is explainable cold.
 
 ### Phase 2 — Trained model (stub — NOT specced here)
 
-Gradient-boosted model (candidate: LightGBM/XGBoost, per open decision D1) predicting price
+Gradient-boosted model (candidate: LightGBM/XGBoost — Python, per decision 0001) predicting price
 direction/magnitude over a horizon, with quantile regression for uncertainty and SHAP for
 per-prediction explanations. Needs ~2–3 months of our own collected snapshots before it
 can beat the baseline. Gets its own epic/subfeature specs when that data exists. The
@@ -49,14 +49,14 @@ earlier draft (`specs/reference/original-draft-spec.md`) sketches the intended a
 | ID | Title | Depends on | One-line |
 |----|-------|-----------|----------|
 | SF-06 | Baseline percentile / seasonality model | SF-03 | Feature builders + the baseline model producing prediction + percentile + confidence for a trip shape. |
-| SF-07 | Inference API | SF-06 | HTTP endpoint: trip shape in → current price context, 90-day outlook, buy-vs-wait, confidence out. |
-| SF-08 | Buy-vs-wait UI surface | SF-07 | The result screen: the verdict, the price curve, the percentile, the "why" panel. |
+| SF-07 | Inference API | SF-06 | HTTP endpoint: trip shape in → current price context, 90-day outlook, buy-vs-wait, confidence out. **This is the current-phase finish line.** |
+| SF-08 | Buy-vs-wait UI surface | SF-07 | **DEFERRED.** The result screen. Not built in the current phase — owner designs the frontend later with Claude Design (decision 0001 / L0 §8 D3). |
 
 ## Build order
 
 1. SF-06 (can start as soon as SF-03's fixture dataset lands).
-2. SF-07.
-3. SF-08.
+2. SF-07 — done = the API answers correctly against the fixture data.
+3. SF-08 — later, once the frontend stack is chosen.
 
 ## Deferred within E2
 
@@ -65,11 +65,11 @@ earlier draft (`specs/reference/original-draft-spec.md`) sketches the intended a
 - Personal price-target alerts with predicted hit date (E5).
 - Model-explanation depth beyond the baseline "why" panel (Phase 2 / SHAP).
 
-## Done when (epic-level, Phase 1)
+## Done when (epic-level, current phase)
 
 - Given a trip shape, the API returns: current price percentile, a 90-day expected-price
   curve, a buy-now / wait verdict with a plain-language reason, and a confidence level.
 - Every number is traceable to the snapshot store — no black box in the baseline.
 - The backtest harness scores the baseline on held-out fixture history and reports a
   concrete hit-rate for the buy-vs-wait call.
-- The UI surface shows all of the above for a searched route.
+- (SF-08 / the UI showing this to a user is a later phase.)

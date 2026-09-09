@@ -10,8 +10,8 @@ append-only snapshot store (L0 §6), and the committed fixture dataset (L0 §7).
 ## Depends on
 
 - L0 foundation.
-- Open decisions **D1** (language) and **D4** (storage engine) must be resolved first —
-  this subfeature can't start until they are.
+- Stack (decision 0001): **Python 3.12+**, **Pydantic** for the schema models,
+  **Parquet + DuckDB** for the store, **`uv`** for tooling. All locked — this is ready to start.
 
 ## Files owned
 
@@ -19,7 +19,7 @@ append-only snapshot store (L0 §6), and the committed fixture dataset (L0 §7).
 pipeline/schema/**            # the record definition + validators
 pipeline/store/**             # read / write / dedup
 data/fixtures/**              # routes.csv, fare_observations.parquet, README.md
-scripts/gen-fixtures.*        # deterministic fixture generator
+scripts/gen_fixtures.py        # deterministic fixture generator
 tests/schema/**  tests/store/**
 ```
 
@@ -51,7 +51,7 @@ tests/schema/**  tests/store/**
   data exists. Default off in production.
 - No interpretation of prices. No "pick the price for this trip" logic.
 
-### 3. Fixture dataset (`data/fixtures/` + `scripts/gen-fixtures.*`)
+### 3. Fixture dataset (`data/fixtures/` + `scripts/gen_fixtures.py`)
 
 Per L0 §7:
 
@@ -72,7 +72,7 @@ Per L0 §7:
   - ~12 injected error-fare outliers priced **70–85% below** the expected price for their
     cell — deep enough to trip SF-05's `price_below_floor` gate (floor is 0.35× the
     trailing median, so an outlier must sit below that).
-- Fixed RNG seed. `scripts/gen-fixtures.*` reproduces the byte-identical file.
+- Fixed RNG seed. `scripts/gen_fixtures.py` reproduces the byte-identical file.
 - `data/fixtures/README.md` documents the seed, the price model, and the regen command.
 
 ## Done when
@@ -84,7 +84,7 @@ Per L0 §7:
 - `read()` with each filter type returns the expected subset of the fixture data.
 - `SNAP_USE_FIXTURES=1` makes `read()` return fixture rows with no `data/snapshots/` present.
 - CI validates every fixture row against the schema and fails on any violation.
-- `scripts/gen-fixtures.*` run twice produces identical output.
+- `scripts/gen_fixtures.py` run twice produces identical output.
 
 ## Out of scope
 

@@ -10,8 +10,8 @@ write to the snapshot store, and re-queue partial/failed work. Owns route tiers 
 ## Depends on
 
 - SF-03 (store), SF-05 (quality gates), and at least one of SF-01 / SF-02.
-- Open decision **D5** (cron vs. workflow engine) — but build the run logic as a plain
-  callable first so it works under either.
+- Stack (decision 0001): run the collection pass from **cron** calling a plain Python
+  entrypoint. Build the run logic as a callable first so a heavier orchestrator stays possible later.
 
 ## Files owned
 

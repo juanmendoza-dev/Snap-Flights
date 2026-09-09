@@ -2,7 +2,7 @@
 
 **Importance:** 10/10. Nothing else in Snap Flights works without this.
 **Status:** specced in depth. Subfeatures SF-01…SF-05.
-**Depends on:** L0 foundation. Blocked on open decisions D1, D4 (see L0 §8) before code starts.
+**Depends on:** L0 foundation. Stack locked (decision 0001) — ready to build.
 
 ---
 
@@ -75,7 +75,7 @@ fetches get re-queued.
 - Airline-direct adapters (Ryanair, Wizz, Southwest) for budget-carrier coverage (E4 dependency).
 - Backfill tooling (re-fetch a route/date range after a gap).
 - Snapshot-store compaction / retention policy once volume is real.
-- A proper orchestrator if cron gets painful (open decision D5).
+- A proper orchestrator (Prefect/Dagster) if cron gets painful — cron is the choice for now (decision 0001).
 
 ## Done when (epic-level)
 

@@ -12,7 +12,7 @@ descriptive statistics that anyone can defend cold.
 ## Depends on
 
 - SF-03 (store + fixture dataset).
-- Open decision **D1** (language).
+- Stack (decision 0001): Python. Use polars or pandas + numpy for the stats; no ML library needed for the baseline.
 
 ## Files owned
 

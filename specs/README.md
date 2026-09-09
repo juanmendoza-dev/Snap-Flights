@@ -32,36 +32,45 @@ Deep: **L0**, **E1 data pipeline**, **E2 baseline prediction**.
 Stubs: **E3** search & discovery, **E4** cheap-fare hunting, **E5** alerts & automation,
 **E6** booking handoff, **E7** trip quality, **E8** portfolio polish.
 
-The MVP spine is: **collect fares → store snapshots → baseline prediction → show buy-vs-wait**.
-Everything specced now serves that spine. The MVP is **one-way, economy, 1 passenger only**
-(see L0 §8) — round trips wait for a confirmed round-trip-capable data source.
+The current phase is the **backend spine**: collect fares → store snapshots → baseline
+prediction → API answers "book now or wait?". The website is deliberately deferred (see
+below). The MVP is **one-way, economy, 1 passenger only** (L0 §8).
 
-## MVP subfeatures (one agent each)
+## Stack — locked for the backend
 
-| ID | Title | Epic | Depends on |
-|----|-------|------|------------|
-| SF-01 | Travelpayouts source adapter | E1 | SF-03 |
-| SF-02 | fast-flights source adapter | E1 | SF-03 |
-| SF-03 | Canonical schema + snapshot store | E1 | — |
-| SF-04 | Collection scheduler + route prioritization | E1 | SF-03, (SF-01 or SF-02) |
-| SF-05 | Data-quality gates | E1 | SF-03 |
-| SF-06 | Baseline percentile / seasonality model | E2 | SF-03 |
-| SF-07 | Inference API | E2 | SF-06 |
-| SF-08 | Buy-vs-wait UI surface | E2 | SF-07 |
+See `decisions/0001-stack.md`. Short version: **Python 3.12+**, **FastAPI**, **Parquet +
+DuckDB**, **cron**, **`uv`**, hosted on **Oracle Cloud Always Free**. The frontend stack is
+**not decided** — owner designs the site later with Claude Design, its own decision record.
 
-## Open decisions (not yet locked) — resolve these before any agent starts
+## Subfeatures — current phase
 
-**Every MVP subfeature is blocked on the stack decision (D1–D4).** Nothing is pickup-ready
-until that pros/cons conversation happens. Order of unblocking: decide stack → SF-03 →
-everything else.
+| ID | Title | Epic | Depends on | Status |
+|----|-------|------|------------|--------|
+| SF-03 | Canonical schema + snapshot store | E1 | — | **ready — do first** |
+| SF-01 | Travelpayouts source adapter | E1 | SF-03 | ready after SF-03 |
+| SF-02 | fast-flights source adapter | E1 | SF-03 | ready after SF-03 |
+| SF-05 | Data-quality gates | E1 | SF-03 | ready after SF-03 |
+| SF-04 | Collection scheduler + route prioritization | E1 | SF-03, SF-05, (SF-01 or SF-02) | after the above |
+| SF-06 | Baseline percentile / seasonality model | E2 | SF-03 | ready after SF-03 |
+| SF-07 | Inference API | E2 | SF-06 | after SF-06 — **phase finish line** |
+| SF-08 | Buy-vs-wait UI surface | E2 | SF-07 | **DEFERRED** — frontend not in this phase |
 
-- **Tech stack** — language(s), API framework, frontend framework, storage engine,
-  orchestrator, package manager. Deliberately deferred; to be decided with a pros/cons
-  review. Note: the option space is **already partly narrowed** — `fast-flights` is a
-  Python library (SF-02), and Parquet is assumed throughout L0. See `L0-foundation.md` §8
-  for what's really still open.
-- The earlier draft's leaning (Python + gradient boosting) is in
-  `reference/original-draft-spec.md` — context, not binding.
+### Two-lane split (after SF-03 lands on `main`)
+
+| Lane A — Ingestion (Codex) | Lane B — Modeling + Serving (Claude) |
+|---|---|
+| SF-01, SF-02, SF-04, SF-05 | SF-06, SF-07 |
+| `pipeline/adapters/`, `pipeline/scheduler/`, `pipeline/quality/`, `config/routes.yaml` | `models/`, `api/` |
+
+Lanes only meet through `pipeline/schema/` + `pipeline/store/`, which are frozen after SF-03.
+Each lane works in its own checkout/branch, integrates via `--no-ff` PR into `main`.
+
+## Still open
+
+- **Frontend stack** (D3) — deferred by choice; SF-08 on hold.
+- **Auth** (D8) — deferred to E5.
+- The earlier single-file draft's leaning (gradient-boosted model) informs E2 Phase 2,
+  not the current baseline. See `reference/original-draft-spec.md`.
 
 ## Reference
 

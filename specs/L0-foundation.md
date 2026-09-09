@@ -303,42 +303,31 @@ Requirements:
 
 ---
 
-## 8. Open decisions (NOT locked)
+## 8. Decisions
 
-These are deferred deliberately. Do not resolve them unilaterally in a subfeature spec or
-in code — they get decided with a pros/cons review first, then recorded here.
+Backend stack is **locked** — see `specs/decisions/0001-stack.md`. Frontend is deferred.
 
-| # | Decision | Notes / leading candidate |
-|---|----------|---------------------------|
-| D1 | Primary language for pipeline + models | earlier draft assumed Python + LightGBM/XGBoost + SHAP; not binding |
-| D2 | API framework | — |
-| D3 | Frontend framework | earlier draft said "minimal, backend/ML project" — but E2/E3 need real UI surfaces |
-| D4 | Storage engine for the snapshot store | Parquet files + an embedded query engine (e.g. DuckDB) is the working assumption in §6; confirm |
-| D5 | Orchestrator for collection runs | cron vs. a workflow engine (Prefect/Dagster free tier) |
-| D6 | Package manager / repo tooling / monorepo layout | — |
-| D7 | Hosting (free tier) for the collectors and API | Oracle Cloud Always Free mentioned in research |
-| D8 | Auth system — whether MVP has accounts at all | earlier draft rated `6/10`; alerts (E5) need it, MVP spine does not |
+| # | Decision | Status |
+|---|----------|--------|
+| D1 | Language for pipeline + models + API | **Python 3.12+** (decision 0001) |
+| D2 | API framework | **FastAPI** (decision 0001) |
+| D3 | Frontend framework / language | **Deferred.** Owner designs it later with Claude Design; SF-08 is on hold. Gets its own decision record. |
+| D4 | Snapshot-store engine | **Parquet + DuckDB** (decision 0001). SQLite for small operational state only. |
+| D5 | Orchestrator | **cron + Python entrypoint** (decision 0001) |
+| D6 | Python tooling | **`uv`** (decision 0001) |
+| D7 | Hosting | Backend: **Oracle Cloud Always Free (ARM VM)** (decision 0001). Frontend host: deferred with D3. |
+| D8 | Auth / accounts | **Deferred to E5.** None in the current phase. |
 
 Until D1–D4 are settled, subfeature specs describe **behavior and contracts**, and
-implementation waits. `SF-03` (schema + store) is the natural first thing to unblock once
-D1 and D4 land.
-
-### The option space is already partly narrowed — know this before the pros/cons review
-
-- **D1 leans Python whether we like it or not.** `fast-flights` (SF-02) is a Python
-  library. A non-Python pipeline would need a subprocess/service bridge just for that
-  adapter. "Python for the pipeline" is close to decided; the real D1 question is the
-  *frontend* and *API* language.
-- **D4 currently assumes Parquet.** §1, §6 and §7 all name Parquet files. If the storage
-  engine changes, those three sections change with it. Treat "Parquet + embedded engine"
-  as the default to confirm-or-replace, not a blank slate.
+Backend stack is locked (decision 0001), so `SF-03` is ready to start. Everything in the
+current phase is Python + FastAPI + DuckDB/Parquet, managed with `uv`.
 
 ### MVP is one-way only
 
 Travelpayouts' round-trip support is unverified, and it's our primary source. The MVP
 collects, models, and displays **one-way** trips (`trip_type = "one_way"`, `return_date =
-null`). `return_date` / `round_trip` stay in the schema for later. SF-07/SF-08 request and
-render one-way only. Revisit once a round-trip-capable source is confirmed.
+null`). `return_date` / `round_trip` stay in the schema for later. The API (SF-07) accepts
+one-way only. Revisit once a round-trip-capable source is confirmed.
 
 ---
 

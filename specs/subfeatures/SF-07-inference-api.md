@@ -11,7 +11,7 @@ baseline model, and returns a single JSON payload the UI can render directly.
 
 - SF-06 (the model + feature builders).
 - SF-03 (store).
-- Open decisions **D1**, **D2** (language + API framework).
+- Stack (decision 0001): **Python + FastAPI**. Reuse the Pydantic schema models from `pipeline/schema/` for request/response types. Commit the generated OpenAPI doc.
 
 ## Files owned
 
@@ -73,7 +73,7 @@ The configured route set + which have enough history for a `high`/`medium` confi
 
 - `POST /predict` returns the full payload for every fixture route, with and without `current_price`.
 - Thin-data and unknown-route cases return `200` with the documented shape.
-- Contract tests pin the response schema (so SF-08 can build against it).
+- Contract tests pin the response schema, and the OpenAPI doc is committed (so the frontend can build against it later — SF-08 is deferred).
 - Runs in CI against the fixture dataset with no network.
 - OpenAPI/schema doc generated or committed for the frontend.
 

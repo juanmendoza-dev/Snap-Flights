@@ -1,6 +1,11 @@
 # SF-08 — Buy-vs-Wait UI Surface
 
-**Epic:** E2 · **Importance:** 8/10 · The screen that makes the product feel like "on steroids".
+**Epic:** E2 · **Importance:** 8/10
+**Status: DEFERRED — do not start.** The frontend is not being built in the current phase.
+The owner will design it himself with Claude Design on a deliberately non-trivial technical
+build, and it gets its own stack decision record first (L0 §8, D3). This spec is the
+*intent* for that surface, not a work item yet. The current-phase finish line is SF-07 (the
+API returns correct JSON).
 
 ## Summary
 
