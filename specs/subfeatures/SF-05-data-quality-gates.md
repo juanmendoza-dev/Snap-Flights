@@ -40,6 +40,17 @@ Floors/ceilings/thresholds live in `config/quality.yaml`.
 `rejected` records are **still written to the store** (with `data_quality = "rejected"`) so
 nothing is silently lost — downstream reads filter them out by default.
 
+### Known store interaction — fix before this ships
+
+SF-03's `_build_query` (`pipeline/store/snapshot_store.py`, `SF-03-build.md` §2.8) applies the
+`rejected` exclusion **before** the dedup window, not after. If a later observation of an
+`observation_id` that already exists as `ok` is stamped `rejected` and written, the read
+filters the `rejected` row out first, then dedup keeps the earlier `ok` row — so the bad
+price resurfaces instead of the observation disappearing. Every SF-03 fixture row is `ok`,
+so nothing in the current pass reaches this, but SF-05 is the first spec that can produce a
+`rejected` row for an already-seen key. SF-05 must move the exclusion to after the dedup
+window (or make dedup quality-aware) and add a test for the re-stamp case.
+
 ## Run-level alarms
 
 Computed over a run's full batch, returned to SF-04 which decides to fail the run:
