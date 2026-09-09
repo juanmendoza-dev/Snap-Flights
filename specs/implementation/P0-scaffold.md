@@ -40,6 +40,7 @@ models/__init__.py                   # namespace only
 models/README.md                     # what lives under models/, per L0 §1
 api/__init__.py                      # namespace only
 shared/__init__.py                   # namespace only
+shared/clock.py                      # THE single source of "now" — today_utc() / now_utc()
 config/.gitkeep                      # config/ exists before SF-06 writes baseline.yaml
 data/fixtures/.gitkeep               # replaced by real fixtures in SF-03
 web/.gitkeep                         # deferred (D3) — directory exists, stays empty
@@ -139,6 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SNAP_USE_FIXTURES: "1"
+      SNAP_TODAY: "2026-09-09"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -156,6 +158,12 @@ jobs:
         run: uv run python scripts/validate_fixtures.py
 ```
 
+**`SNAP_TODAY` is pinned to the fixture dataset's newest `fetched_date`** (SF-03-build §4,
+`FIXTURE_TODAY`). Without it, CI reads the real wall clock, and every check anchored to
+"today" — `/health` source recency, the `depart_date_in_the_past` 400, `predict()`'s default
+`as_of` — starts failing the day real-world today drifts past 2026-09-09. Pinning it here
+makes the whole suite time-invariant; `shared/clock.py` is what reads it.
+
 **Network rule:** dependency installation uses the network (unavoidable). Everything after
 `uv sync` must run with no outbound calls. No test may reach a network; adapters are not in
 this pass, so nothing legitimately needs one.
@@ -172,6 +180,28 @@ def main(argv: list[str] | None = None) -> int:
 ```
 
 ```python
+# shared/clock.py
+import datetime as _dt
+
+SNAP_TODAY_ENV: str = "SNAP_TODAY"
+
+def today_utc() -> _dt.date:
+    """The project's definition of "today". Returns SNAP_TODAY parsed as an ISO
+    YYYY-MM-DD date when that variable is set and non-empty, otherwise the real UTC
+    date. Raises ValueError when SNAP_TODAY is set but unparseable — a typo'd pin
+    must fail loudly, not fall back to the clock it was meant to replace."""
+
+def now_utc() -> _dt.datetime:
+    """Timezone-aware UTC now. When SNAP_TODAY is set, returns that date at
+    00:00:00+00:00, so a pinned run has a single fixed instant. Same parse rules,
+    same ValueError."""
+```
+
+`today_utc()` is not cached: a long-running process must see a real date rollover. Both
+functions read the environment on every call, which is what lets a test `monkeypatch.setenv`
+the pin without reloading modules.
+
+```python
 # tests/conftest.py
 import pytest
 from pathlib import Path
@@ -185,6 +215,13 @@ def _clean_fixture_env(monkeypatch: pytest.MonkeyPatch) -> None:
     that wants fixture mode must opt in explicitly. Prevents CI's job-level
     SNAP_USE_FIXTURES=1 from silently changing unit-test behaviour."""
 ```
+
+**`SNAP_TODAY` is deliberately *not* stripped here.** It is a determinism pin, not a mode
+switch: tests anchored to the fixture calendar (`/health` recency, `depart_date` validation)
+must see it, and deleting it would reintroduce exactly the wall-clock drift it exists to
+prevent. The one test that needs the real-clock branch — `test_clock_override` — unsets it
+itself with `monkeypatch.delenv("SNAP_TODAY", raising=False)`. Do not add it to
+`_clean_fixture_env`.
 
 ## Config file schemas
 
@@ -204,6 +241,7 @@ SF-07's, `config/quality.yaml` is SF-05's and is **not** created in this pass.
 | `test_third_party_imports` | `duckdb`, `polars`, `pyarrow`, `pydantic`, `fastapi`, `yaml` import; `pandas` does **not** (asserts the polars decision is not quietly violated) |
 | `test_validate_fixtures_skips_when_absent` | `scripts.validate_fixtures.main([])` returns `0` when the fixture file is missing |
 | `test_pyarrow_pinned_to_one_minor` | `pyproject.toml` constrains `pyarrow` to a single minor version (guards fixture byte-identity) |
+| `test_clock_override` | with `SNAP_TODAY=2026-09-09`, `shared.clock.today_utc() == date(2026, 9, 9)` and `now_utc() == datetime(2026, 9, 9, tzinfo=UTC)`; with `SNAP_TODAY` unset (`monkeypatch.delenv`), `today_utc()` equals `datetime.now(UTC).date()`; with `SNAP_TODAY="not-a-date"`, both raise `ValueError` |
 
 There is no parent L2 spec, so there is no Done-when mapping table. The Done-when list below
 stands in.
@@ -212,10 +250,12 @@ stands in.
 
 - `uv sync --locked --dev` succeeds from a clean checkout on Python 3.12.
 - `uv run ruff check . && uv run ruff format --check .` is clean.
-- `uv run pytest` passes with the seven tests above.
+- `uv run pytest` passes with the eight tests above.
 - `uv run python scripts/validate_fixtures.py` exits 0 and prints a skip notice.
 - The CI workflow is green on `main`.
 - Every directory in L0 §1 exists in the tree (`data/snapshots/` excepted).
+- `shared/clock.py` exists and `SNAP_TODAY=2026-09-09 uv run python -c "from shared.clock
+  import today_utc; print(today_utc())"` prints `2026-09-09`.
 
 ## Out of scope
 
@@ -230,7 +270,7 @@ stands in.
 | # | Message | Contains |
 |---|---------|----------|
 | 1 | `Set up the uv project and pin the toolchain` | `pyproject.toml`, `.python-version`, `uv.lock`, `.gitignore` additions |
-| 2 | `Lay out the directory tree from L0` | all `__init__.py`, `.gitkeep`, `pipeline/README.md`, `models/README.md` |
+| 2 | `Lay out the directory tree from L0` | all `__init__.py`, `.gitkeep`, `pipeline/README.md`, `models/README.md`, `shared/clock.py` |
 | 3 | `Add the scaffold tests and pytest conftest` | `tests/__init__.py`, `tests/conftest.py`, `tests/test_scaffold.py` |
 | 4 | `Add the fixture validator skeleton` | `scripts/__init__.py`, `scripts/validate_fixtures.py` |
 | 5 | `Run lint, tests and fixture validation in CI` | `.github/workflows/ci.yml` |
@@ -252,3 +292,6 @@ SF-03 (and everything after) may assume, without re-checking:
 6. `tests/conftest.py` provides `repo_root` and unsets `SNAP_USE_FIXTURES` before every
    test. A test that needs fixture mode sets it itself.
 7. Line length is 100 and the ruff rule set is fixed. Code that fails `ruff check` fails CI.
+8. `shared.clock.today_utc()` / `now_utc()` are the only sanctioned source of "now". No
+   module calls `date.today()` or `datetime.now()` directly. CI pins
+   `SNAP_TODAY=2026-09-09`.

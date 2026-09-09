@@ -35,7 +35,7 @@ shared/routes.py                 # route-set loader (config/routes.yaml if prese
 config/api.yaml                  # OWNED HERE — cache TTL, CORS, health window, min history
 scripts/dump_openapi.py          # regenerates api/openapi.json; --check for CI
 tests/api/__init__.py
-tests/api/conftest.py            # TestClient in fixture mode, cache cleared per test
+tests/api/conftest.py            # TestClient in fixture mode + SNAP_TODAY pinned, cache cleared per test
 tests/api/test_health.py
 tests/api/test_predict.py
 tests/api/test_predict_validation.py
@@ -81,7 +81,8 @@ cors:
   allow_headers: ["*"]
 
 health:
-  # A source counts as "recent" if it has a fetched_date within this many days of today.
+  # A source counts as "recent" if it has a fetched_date within this many days of
+  # shared.clock.today_utc() — not date.today() (P0 §Interfaces frozen 8).
   recent_observation_window_days: 3
 
 routes:
@@ -276,7 +277,14 @@ def get_health(
     """Liveness + which sources have recent observations + the fixture-mode flag.
     fixture_mode reads shared.settings.use_fixtures() — the same accessor everything else
     uses (SF-03-build §9.6). Always 200 while the process is up; a store with no data is
-    reported as sources=[] with routes_loaded from the route file, not an error."""
+    reported as sources=[] with routes_loaded from the route file, not an error.
+
+    Recency is anchored to shared.clock.today_utc(): the handler passes it as
+    store.sources_with_recent_data(within_days=settings.health.recent_observation_window_days,
+    as_of=today_utc()), and SourceHealth.recent is computed against that same date.
+    checked_at is shared.clock.now_utc() — the one now_utc() consumer in this pass. Neither
+    reads date.today() or datetime.now(), so with SNAP_TODAY pinned the whole /health
+    payload is deterministic against the fixture calendar."""
 ```
 
 ```python
@@ -293,8 +301,11 @@ def post_predict(
     """1. Reject out-of-MVP requests with 400 (§6).
        2. Build models.baseline.TripShape and an optional Money.
        3. Cache lookup on the key in §7.
-       4. models.baseline.predict(trip_shape, current_price, as_of=today_utc,
-          config=baseline_config, store=store).
+       4. models.baseline.predict(trip_shape, current_price,
+          as_of=shared.clock.today_utc(), config=baseline_config, store=store).
+          The router calls today_utc() ONCE per request and reuses that date for the
+          §6 validation checks, the §7 cache key and this call, so a request cannot
+          straddle a date rollover and validate against one day while caching another.
        5. PredictResponse.from_prediction(...), cache it, return it.
        Thin data and unknown routes are 200 — predict() already returns the neutral/low/
        note shape (SF-06-build §8.7); this router does not special-case them."""
@@ -311,7 +322,11 @@ def get_routes(
     """The configured route set (shared.routes.load_routes) joined with per-route history
     counts from a single store.read_frame() over the trailing history window, grouped by
     (route_key, ap_bucket). max_confidence is decide_confidence() applied to the best
-    bucket. One store read for all routes — not one per route."""
+    bucket. One store read for all routes — not one per route.
+
+    as_of = shared.clock.today_utc(), called once and used both as the right edge of the
+    trailing window ([as_of - baseline_config.history.window_days, as_of]) and as
+    RoutesResponse.as_of, so the reported date always describes the window actually read."""
 ```
 
 ## 6. Request validation — the 400 rules, pinned
@@ -323,7 +338,7 @@ def get_routes(
 | `cabin != "economy"` | 400 | `cabin_not_supported` | `The MVP supports economy only.` |
 | `passengers != 1` | 400 | `passengers_not_supported` | `The MVP supports 1 passenger only.` |
 | `origin == destination` | 400 | `same_origin_destination` | `Origin and destination must differ.` |
-| `depart_date` before today (UTC) | 400 | `depart_date_in_the_past` | `depart_date must be today or later.` |
+| `depart_date` before `shared.clock.today_utc()` | 400 | `depart_date_in_the_past` | `depart_date must be today or later.` |
 | `depart_date` more than `serving.max_days_to_departure` out | 400 | `depart_date_too_far` | `depart_date must be within {n} days.` |
 | Malformed IATA / currency / date, unknown enum value, unknown field | 422 | `validation_error` | Pydantic's message, `field` set |
 
@@ -332,6 +347,13 @@ round-trip 400. Rejecting the other two out-of-MVP values the same way is the co
 reading: the model has no non-economy or multi-passenger history to answer from, so a 200
 would be a fabricated answer. An **unknown route** is explicitly *not* a 400 — SF-07 requires
 a 200 with `verdict: "neutral"`.
+
+**"Today" in this table is `shared.clock.today_utc()`, never `date.today()`** (P0
+§Interfaces frozen 8). Both date-bound rows — `depart_date_in_the_past` and
+`depart_date_too_far` — compare against the single date the router resolved at the top of
+the request. Under CI's pinned `SNAP_TODAY=2026-09-09` that is the fixture's newest
+`fetched_date`, which is what makes these two rows assertable with literal dates instead of
+dates computed relative to whenever the suite happens to run.
 
 FastAPI's own `RequestValidationError` produces 422; the MVP-scope checks above run in the
 router and produce 400. Both are rendered as `ErrorBody`.
@@ -346,8 +368,12 @@ class PredictCache:
                    passengers, current_price.amount_minor or -1,
                    current_price.currency or "", as_of_date.isoformat())
 
-    as_of_date is in the key so a cached entry cannot survive a date rollover and answer
-    with yesterday's days-to-departure.
+    as_of_date is shared.clock.today_utc() — the same value the router passes to
+    predict() as `as_of`, resolved once per request. It is in the key so a cached entry
+    cannot survive a date rollover and answer with yesterday's days-to-departure. Because
+    both sides read shared.clock, pinning SNAP_TODAY freezes the key too, which is what
+    lets test_as_of_date_is_in_the_key drive a rollover by setting the env var instead of
+    waiting for midnight.
     """
 
     def __init__(self, *, ttl_seconds: int, max_entries: int, enabled: bool = True,
@@ -390,7 +416,7 @@ to P0's workflow.
 | Thin-data and unknown-route cases return `200` with the documented shape | `tests/api/test_predict.py::test_unknown_route_returns_200_neutral_low`, `::test_unknown_route_has_data_quality_note`, `::test_thin_history_returns_200_neutral_low`, `::test_thin_data_response_still_validates_against_the_contract` |
 | Contract tests pin the response schema | `tests/api/test_contract.py::test_predict_response_keys_exact` (the 10 top-level keys of SF-07's payload, in order), `::test_basis_serialises_from_not_from_underscore`, `::test_expected_low_null_unless_wait`, `::test_expected_curve_descending_from_dtd_now`, `::test_price_percentile_is_int_0_100`, `::test_verdict_and_confidence_enum_values`, `::test_error_body_shape_on_400`, `::test_error_body_shape_on_422` |
 | … and the OpenAPI doc is committed | `tests/api/test_openapi.py::test_committed_doc_is_current`, `::test_doc_contains_the_three_paths`, `::test_predict_400_documented`, `::test_doc_is_sorted_and_indented` |
-| Runs in CI against the fixture dataset with no network | `tests/api/conftest.py` sets `SNAP_USE_FIXTURES=1` and asserts `data/snapshots/` is absent; `tests/api/test_health.py::test_fixture_mode_flag_is_true`, `tests/api/test_predict.py::test_no_outbound_socket` (monkeypatches `socket.socket` to raise for the duration of a `/predict` call; if DuckDB or pyarrow turn out to open a local socket internally, drop this test and rely on CI running with no egress instead of weakening it) |
+| Runs in CI against the fixture dataset with no network | `tests/api/conftest.py` sets `SNAP_USE_FIXTURES=1` and `SNAP_TODAY=2026-09-09` (matching CI, so a local run behaves identically) and asserts `data/snapshots/` is absent; `tests/api/test_health.py::test_fixture_mode_flag_is_true`, `tests/api/test_predict.py::test_no_outbound_socket` (monkeypatches `socket.socket` to raise for the duration of a `/predict` call; if DuckDB or pyarrow turn out to open a local socket internally, drop this test and rely on CI running with no egress instead of weakening it) |
 | OpenAPI/schema doc generated or committed for the frontend | same as above — `api/openapi.json` is a committed file |
 
 Supporting tests:
@@ -399,9 +425,12 @@ Supporting tests:
 |---|---|
 | `test_health.py::test_status_ok` | 200, `status == "ok"` |
 | `test_health.py::test_sources_reported` | both fixture sources present, `last_fetched_date == 2026-09-09` |
-| `test_health.py::test_recent_flag_uses_configured_window` | |
+| `test_health.py::test_recent_flag_uses_configured_window` | recency is measured from `shared.clock.today_utc()`: both fixture sources are `recent` at the pinned `2026-09-09`, and with `SNAP_TODAY` monkeypatched to `2026-09-20` both go `recent = False` while `last_fetched_date` stays `2026-09-09` |
 | `test_health.py::test_routes_loaded_is_15` | |
-| `test_predict_validation.py` | one test per row of the §6 table, asserting status, `error` code and `message` |
+| `test_predict_validation.py` | one test per row of the §6 table, asserting status, `error` code and `message`. Runs with `SNAP_TODAY=2026-09-09` (set in `tests/api/conftest.py`), so `depart_date_in_the_past` can post a literal `2026-09-08` and `depart_date_too_far` a literal `2027-09-10` rather than dates computed off the real clock |
+| `test_predict_validation.py::test_depart_date_in_the_past_follows_the_clock_override` | with `monkeypatch.setenv("SNAP_TODAY", "2026-09-20")`, a `depart_date` of `2026-09-15` is now a 400 `depart_date_in_the_past` although it passed under the pinned default — proves the check reads `shared.clock.today_utc()` and not `date.today()` |
+| `test_health.py::test_checked_at_follows_the_clock_override` | `checked_at` is `shared.clock.now_utc()`: under the pinned `SNAP_TODAY` it is `2026-09-09T00:00:00+00:00`, tz-aware |
+| `test_routes.py::test_as_of_is_today_utc` | `RoutesResponse.as_of == shared.clock.today_utc()` |
 | `test_predict_validation.py::test_unknown_field_is_422` | `extra="forbid"` is live on the wire |
 | `test_predict_validation.py::test_lowercase_iata_is_422` | L0 §2 formats enforced |
 | `test_routes.py::test_returns_all_15_routes` | joined with `data/fixtures/routes.csv` |
@@ -439,7 +468,9 @@ What it may rely on:
    default `{"detail": ...}`.
 5. `price_percentile` is `0..100` and **low means cheap** (SF-06-build §8.4).
 6. `expected_low` is `null` unless `verdict == "wait"`.
-7. `expected_curve` is descending by `days_to_departure`, first point is today's.
+7. `expected_curve` is descending by `days_to_departure`, first point is today's, where
+   "today" is `shared.clock.today_utc()` (P0 §Interfaces frozen 8) — the same date returned
+   in `GET /routes`'s `as_of` and used for the `depart_date` 400s.
 8. Thin data / unknown route is a `200`, never a `404` or `500`.
 9. `api/openapi.json` is regenerated by `uv run python scripts/dump_openapi.py` and is
    verified current by a test.

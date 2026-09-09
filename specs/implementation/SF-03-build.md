@@ -452,7 +452,9 @@ class SnapshotStore:
     def sources_with_recent_data(self, *, within_days: int = 3, as_of: date | None = None
                                  ) -> dict[str, date]:
         """source -> most recent fetched_date, for sources seen within the window.
-        Backs GET /health (SF-07)."""
+        `as_of` defaults to shared.clock.today_utc() — never date.today(), so a pinned
+        SNAP_TODAY makes /health deterministic against the fixture calendar (P0 §Interfaces
+        frozen 8). Backs GET /health (SF-07)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +528,7 @@ output does not depend on iteration order, parallelism, or Python's hash seed.
 ```python
 SEED: str = "snap-flights-fixtures-v1"
 FIXTURE_TODAY: date = date(2026, 9, 9)          # the "as of" date the dataset is built around
+                                                # MUST equal CI's SNAP_TODAY (P0 ci.yml env)
 FETCHED_DAYS: int = 90                          # fetched_date in [2026-06-12 .. 2026-09-09]
 DTD_GRID: range = range(1, 121)                 # days-to-departure 1..120, per fetched_date
 ITINERARY_MAX_DTD: int = 60                     # itinerary rows only inside this window
@@ -537,6 +540,17 @@ def _h(*parts: object) -> int:
 def _unit(*parts: object) -> float:
     """_h(*parts) % 10**9 / 10**9  -> a stable float in [0, 1)"""
 ```
+
+**`FIXTURE_TODAY` and CI's `SNAP_TODAY` are one value in two files.** The generator
+anchors the dataset's newest `fetched_date` here; `.github/workflows/ci.yml` pins
+`SNAP_TODAY: "2026-09-09"` so `shared.clock.today_utc()` returns that same day. If they ever
+disagree, "today" lands outside the fixture calendar and every recency, `days_to_departure`
+and `depart_date`-validation assertion in SF-06/SF-07 goes quietly wrong. The generator does
+not read the environment — it stays a hardcoded constant so regeneration is reproducible —
+so the two are kept honest by a test instead:
+`tests/fixtures/test_fixture_dataset.py::test_fixture_today_matches_ci_snap_today` parses
+`.github/workflows/ci.yml` and asserts `env.SNAP_TODAY == FIXTURE_TODAY.isoformat()`.
+Reading that file from a test is not editing it; SF-03 still owns none of it.
 
 ### 4.1 Grid
 
@@ -832,6 +846,7 @@ Additional tests not tied to a Done-when bullet but required by this build spec:
 | `tests/store/test_read.py::test_read_frame_schema_is_frozen` | the §6 column order and dtype table exactly |
 | `tests/store/test_read.py::test_read_matches_read_frame` | both paths return the same observation ids for the same filters |
 | `tests/fixtures/test_fixture_dataset.py::test_row_counts` | 162,000 calendar + 27,000 itinerary = 189,000 |
+| `tests/fixtures/test_fixture_dataset.py::test_fixture_today_matches_ci_snap_today` | `FIXTURE_TODAY.isoformat()` equals the `SNAP_TODAY` value in `.github/workflows/ci.yml`, and equals the maximum `fetched_date` in the committed parquet |
 | `tests/fixtures/test_fixture_dataset.py::test_route_csv_matches_l0_columns` | header and 15 rows exactly as §4.2 |
 | `tests/fixtures/test_fixture_dataset.py::test_all_rows_are_one_way_economy_single_pax` | L0 §8 MVP scope |
 | `tests/fixtures/test_fixture_dataset.py::test_ap_curve_shape_split` | 40–60% of (route, travel-month) cells are `dip` |
@@ -891,6 +906,11 @@ per-cell counts as everyone else; what differs is which source the surviving row
    `GET /health`.
 10. `store.write()` never mutates or deletes an existing file, so a test that writes into a
     `tmp_path` store cannot corrupt the fixtures.
+11. "Today" comes from `shared.clock.today_utc()` / `now_utc()` and nowhere else (P0
+    §Interfaces frozen 8). `sources_with_recent_data()` already defaults its `as_of` that
+    way; SF-06 and SF-07 default theirs the same way rather than calling `date.today()` or
+    `datetime.now()`. Under CI's pinned `SNAP_TODAY=2026-09-09` that date is the fixture's
+    newest `fetched_date` (`FIXTURE_TODAY`, §4), so "today" is always inside the dataset.
 
 ## 10. Out of scope
 

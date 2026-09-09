@@ -505,7 +505,8 @@ def latest_observed_price(
 ) -> CurrentPrice | None:
     """The cheapest observation for this exact (route_key, depart_date) at the most recent
     fetched_date at or before as_of, after the prefer-itinerary collapse. `as_of` defaults
-    to today (UTC). Returns None when the store has nothing for that trip shape.
+    to shared.clock.today_utc() — never date.today() (P0 §Interfaces frozen 8). Returns
+    None when the store has nothing for that trip shape.
 
     source = PriceSource.STORE; as_of = that row's fetched_at.
     This lives in models/, not api/, so SF-07 and the backtest resolve 'the current price'
@@ -523,7 +524,8 @@ def predict(
     Prediction with verdict=neutral, confidence=low and a populated data_quality_note.
 
     Order of operations:
-      1. as_of  <- as_of or today (UTC). config <- config or load_baseline_config().
+      1. as_of  <- as_of or shared.clock.today_utc(). config <- config or
+         load_baseline_config(). This is the only clock read in the whole call.
       2. history <- load_route_history(trip_shape.route_key, as_of=as_of, ...)
       3. resolved <- current_price (source=user_supplied) or latest_observed_price(...)
          If both are absent -> return the thin-data Prediction, note
@@ -543,12 +545,16 @@ def predict(
      10. basis <- Basis(...); reason <- build_reason(...)
 
     Deterministic: same store contents + same as_of + same config -> byte-identical
-    Prediction. No wall-clock read anywhere except the as_of default.
+    Prediction. No wall-clock read anywhere except the as_of default, and that read goes
+    through shared.clock.today_utc(), so SNAP_TODAY pins the whole call.
     """
 ```
 
-`predict()` is pure with respect to its arguments — it never reads `datetime.now()` after
-step 1 — so SF-07 can cache on `(trip_shape, current_price, as_of_date)` safely.
+`predict()` is pure with respect to its arguments — it reads `shared.clock.today_utc()`
+exactly once, in step 1, and never touches a clock after that — so SF-07 can cache on
+`(trip_shape, current_price, as_of_date)` safely. No module under `models/` calls
+`date.today()` or `datetime.now()`; `shared.clock` is the only sanctioned source (P0
+§Interfaces frozen 8).
 
 ## 5. Backtest harness
 
@@ -720,10 +726,11 @@ alone and never needs to know a route's region or tier.
    `data_quality_note` non-`None`. SF-07 maps this straight to its documented `200`
    response — no special-casing in `api/`.
 8. `latest_observed_price(trip_shape, as_of=None, store=None) -> CurrentPrice | None` is
-   the only sanctioned way to fill an omitted `current_price`. SF-07 must not query the
-   store itself.
-9. `predict()` reads the clock exactly once (the `as_of` default), so caching on
-   `(trip_shape, current_price, as_of)` is sound.
+   the only sanctioned way to fill an omitted `current_price`. Its `as_of` defaults to
+   `shared.clock.today_utc()`. SF-07 must not query the store itself.
+9. `predict()` reads the clock exactly once — `shared.clock.today_utc()`, as the `as_of`
+   default — so caching on `(trip_shape, current_price, as_of)` is sound. SF-07 gets the
+   same date from the same function for its cache key, so the two cannot disagree.
 10. `config/baseline.yaml` is SF-06's file. SF-07 reads it only through
     `load_baseline_config()` and puts its own settings in `config/api.yaml`.
 11. Confidence on the committed fixture: the `0-3` and `4-7` AP buckets cap at `medium`
