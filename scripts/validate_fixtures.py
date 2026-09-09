@@ -16,9 +16,8 @@ def main(argv: list[str] | None = None) -> int:
     canonical schema. Returns 0 on success, 1 on any violation, 0 with a printed
     skip notice when the fixture file does not exist yet (P0 state)."""
     if not FIXTURE_PATH.exists():
-        print(
-            f"skip: {FIXTURE_PATH.relative_to(REPO_ROOT)} does not exist yet — nothing to validate"
-        )
+        relative = FIXTURE_PATH.relative_to(REPO_ROOT)
+        print(f"skip: {relative} does not exist yet — nothing to validate")
         return 0
 
     raise NotImplementedError("fixture validation lands with SF-03")
