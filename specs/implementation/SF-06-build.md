@@ -1,0 +1,710 @@
+# SF-06 — Build Spec: Baseline Percentile / Seasonality Model
+
+**Tier:** L3 (build spec) · **Parent:** `specs/subfeatures/SF-06-baseline-prediction-model.md`
+**Execution slot:** third, after SF-03. Blocks SF-07.
+
+## Summary
+
+Implements SF-06 exactly: feature builders over `store.read_frame()`, the baseline
+`predict()`, and the walk-forward backtest. Descriptive statistics only — no training, no ML
+dependency.
+
+## Depends on
+
+- SF-03 on `main`, and specifically the interfaces frozen in `SF-03-build.md` §9.
+- Decision 0001. Stats library: **polars** (P0's project-wide choice).
+
+## Files owned
+
+```
+models/__init__.py                     # (exists from P0)
+models/features/__init__.py            # re-exports: ap_bucket, AP_BUCKETS, build_* functions
+models/features/buckets.py             # AP bucket definitions + ap_bucket()
+models/features/observations.py        # route history frame: load, prefer-itinerary collapse
+models/features/distributions.py       # cell distributions (median, p10..p90, count, CoV)
+models/baseline/__init__.py            # re-exports: predict, latest_observed_price, types
+models/baseline/config.py              # BaselineConfig + load_baseline_config()
+models/baseline/types.py               # TripShape, Money, CurvePoint, ExpectedLow, Basis, Prediction
+models/baseline/percentile.py          # percentile_of()
+models/baseline/curve.py               # expected_curve() + smoothing
+models/baseline/verdict.py             # decide_verdict(), decide_confidence(), build_reason()
+models/baseline/predictor.py           # predict(), latest_observed_price()
+models/backtest/__init__.py            # re-exports: run_backtest, write_report
+models/backtest/harness.py             # walk-forward loop
+models/backtest/metrics.py             # hit rate, regret, percentile calibration
+models/backtest/reports/.gitkeep       # latest.json lands here
+config/baseline.yaml                   # OWNED HERE — every threshold SF-06 uses
+tests/models/__init__.py
+tests/models/conftest.py               # fixture-mode store + a small synthetic frame factory
+tests/models/test_buckets.py
+tests/models/test_observations.py
+tests/models/test_distributions.py
+tests/models/test_percentile.py
+tests/models/test_curve.py
+tests/models/test_verdict.py
+tests/models/test_predict.py
+tests/models/test_config.py
+tests/models/test_backtest.py
+```
+
+**Ownership note:** SF-06's L2 *Files owned* section lists only `models/**` and
+`tests/models/**`, but its body says "config in `config/baseline.yaml`". The file is assigned
+here. See `specs/implementation/README.md` open question 4.
+
+**Not owned:** anything under `pipeline/`, `api/`, `config/quality.yaml`, `config/routes.yaml`.
+
+## 1. Exact file tree
+
+The block above is the tree, one line per path, nothing else.
+
+## 2. `config/baseline.yaml` — committed default
+
+Every number in SF-06's rules lives here. No threshold is a literal in code.
+
+```yaml
+# Baseline prediction model (SF-06). Every threshold the model uses lives in this file.
+# Defaults are the values written into specs/subfeatures/SF-06-baseline-prediction-model.md.
+schema_version: 1
+
+history:
+  # Trailing window of fetched_date used to build every distribution.
+  window_days: 365
+  # A (route, AP bucket) cell thinner than this cannot produce a verdict:
+  # predict() returns neutral / low with a data_quality_note (SF-07 "thin data").
+  min_cell_observations: 30
+
+advance_purchase_buckets:
+  - {name: "0-3",   min_days: 0,  max_days: 3}
+  - {name: "4-7",   min_days: 4,  max_days: 7}
+  - {name: "8-14",  min_days: 8,  max_days: 14}
+  - {name: "15-21", min_days: 15, max_days: 21}
+  - {name: "22-30", min_days: 22, max_days: 30}
+  - {name: "31-45", min_days: 31, max_days: 45}
+  - {name: "46-60", min_days: 46, max_days: 60}
+  - {name: "61-90", min_days: 61, max_days: 90}
+  - {name: "90+",   min_days: 91, max_days: null}   # null = unbounded
+
+curve:
+  # expected_curve spans days_to_departure from dtd_now down to max(0, dtd_now - horizon_days).
+  horizon_days: 90
+  # Centred rolling mean over the raw per-day series; 1 disables smoothing.
+  smoothing_window_days: 7
+  # Cells with fewer than this many observations fall back to the (route, AP bucket)
+  # median instead of the (route, AP bucket, month, DOW) median.
+  min_cell_observations: 10
+
+verdict:
+  book_now:
+    max_percentile: 25
+    min_curve_rise_pct: 5.0
+  wait:
+    min_percentile: 60
+    min_curve_drop_pct: 7.0
+    search_horizon_days: 60
+
+confidence:
+  low:
+    max_observations: 100     # strictly fewer than this -> low
+    max_cov: 0.35             # CoV strictly greater than this -> low
+  high:
+    min_observations: 500     # at least this many AND
+    max_cov: 0.18             # CoV strictly below this -> high
+
+backtest:
+  horizon_days: 60
+  # Fetched dates are sampled every N days across the available history.
+  stride_days: 7
+  report_path: "models/backtest/reports/latest.json"
+```
+
+Loader:
+
+```python
+# models/baseline/config.py
+from pathlib import Path
+from pydantic import BaseModel, ConfigDict, Field
+
+class BucketSpec(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    name: str
+    min_days: int = Field(ge=0)
+    max_days: int | None = None
+
+class HistoryConfig(BaseModel): window_days: int; min_cell_observations: int
+class CurveConfig(BaseModel): horizon_days: int; smoothing_window_days: int; min_cell_observations: int
+class BookNowConfig(BaseModel): max_percentile: int; min_curve_rise_pct: float
+class WaitConfig(BaseModel): min_percentile: int; min_curve_drop_pct: float; search_horizon_days: int
+class VerdictConfig(BaseModel): book_now: BookNowConfig; wait: WaitConfig
+class ConfidenceBand(BaseModel): ...
+class ConfidenceConfig(BaseModel): low: ConfidenceBand; high: ConfidenceBand
+class BacktestConfig(BaseModel): horizon_days: int; stride_days: int; report_path: str
+
+class BaselineConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    schema_version: int
+    history: HistoryConfig
+    advance_purchase_buckets: tuple[BucketSpec, ...]
+    curve: CurveConfig
+    verdict: VerdictConfig
+    confidence: ConfidenceConfig
+    backtest: BacktestConfig
+
+DEFAULT_CONFIG_PATH: Path  # {repo_root}/config/baseline.yaml
+
+def load_baseline_config(path: Path | None = None) -> BaselineConfig:
+    """Parse and validate config/baseline.yaml. Cached per resolved path.
+    extra='forbid' everywhere: a typo'd key is an error, not a silently ignored setting."""
+```
+
+## 3. Feature builders
+
+### 3.1 `models/features/buckets.py`
+
+```python
+AP_BUCKETS: tuple[str, ...] = (
+    "0-3", "4-7", "8-14", "15-21", "22-30", "31-45", "46-60", "61-90", "90+",
+)
+
+def ap_bucket(days_to_departure: int, config: BaselineConfig | None = None) -> str:
+    """Bucket name for a days-to-departure value. Bounds are inclusive on both ends.
+    Negative days_to_departure raises ValueError — a departed flight has no AP bucket."""
+
+def ap_bucket_expr(config: BaselineConfig | None = None) -> pl.Expr:
+    """The same mapping as a polars expression over a `days_to_departure` column, so the
+    frame path and the scalar path cannot drift. Tested for equivalence over 0..400."""
+```
+
+### 3.2 `models/features/observations.py`
+
+```python
+OBSERVATION_FRAME_COLUMNS: tuple[str, ...] = (
+    "route_key", "source", "price_kind", "fetched_date", "depart_date",
+    "days_to_departure", "ap_bucket", "travel_month", "travel_dow", "amount_minor",
+    "currency", "fetched_at",
+)
+
+def load_route_history(
+    route_key: str,
+    *,
+    as_of: date,
+    config: BaselineConfig | None = None,
+    store: SnapshotStore | None = None,
+) -> pl.DataFrame:
+    """All observations for one route with fetched_date in
+    [as_of - config.history.window_days, as_of], via store.read_frame().
+
+    Adds the derived columns:
+      days_to_departure = (depart_date - fetched_date).days
+      ap_bucket         = ap_bucket_expr()
+      travel_month      = depart_date.month        (1-12, month OF TRAVEL)
+      travel_dow        = depart_date.weekday()    (0=Mon .. 6=Sun, DOW OF TRAVEL)
+
+    Rows with days_to_departure < 0 are dropped (the flight departed before we saw it).
+    Then applies the prefer-itinerary collapse below.
+
+    Returns a frame with exactly OBSERVATION_FRAME_COLUMNS, sorted by
+    (depart_date, fetched_date). Empty history returns an empty frame with that schema.
+    """
+```
+
+**Prefer-itinerary collapse, pinned.** SF-06 says "when both exist for the same
+(route, depart_date, fetched_date), prefer `itinerary`". Implemented as: group by
+`(route_key, depart_date, fetched_date)`; if any row in the group has
+`price_kind == "itinerary"`, keep only the cheapest such row; otherwise keep the cheapest
+`calendar_cheapest` row. One observation per group, always. Ties inside a group break on
+`observation_id` ascending so the result is deterministic.
+
+`store.read_frame()` has already excluded `data_quality = "rejected"` and deduplicated on
+`observation_id` (SF-03-build §9). This function does not repeat either.
+
+`currency`: rows whose `currency` differs from the group's modal currency are dropped, and
+the count is reported in `basis`. The fixture is single-currency so this is a no-op today; it
+exists so a future multi-currency store cannot silently mix units into a percentile.
+
+### 3.3 `models/features/distributions.py`
+
+```python
+DISTRIBUTION_COLUMNS: tuple[str, ...] = (
+    "route_key", "ap_bucket", "travel_month", "travel_dow",
+    "count", "median", "p10", "p25", "p75", "p90", "mean", "std", "cov",
+)
+
+BUCKET_DISTRIBUTION_COLUMNS: tuple[str, ...] = (
+    "route_key", "ap_bucket", "count", "median", "p10", "p25", "p75", "p90",
+    "mean", "std", "cov",
+)
+
+def build_distribution(observations: pl.DataFrame) -> pl.DataFrame:
+    """Per (route_key, ap_bucket, travel_month, travel_dow). Backs expected_curve."""
+
+def build_bucket_distribution(observations: pl.DataFrame) -> pl.DataFrame:
+    """Per (route_key, ap_bucket). Backs price_percentile and confidence — this is the
+    'cell' SF-06's confidence rules refer to."""
+```
+
+- Percentiles use **linear interpolation** between order statistics
+  (`pl.quantile(..., interpolation="linear")`) so p10/p90 are stable on small cells.
+- `cov = std / mean`, population std (`ddof=0`), `null` when `count < 2` or `mean == 0`.
+  A `null` CoV is treated as "not below the high threshold" and "not above the low
+  threshold" — it can neither earn `high` nor force `low` on its own.
+- `median`, `p*`, `mean`, `std` are floats in minor units; only values that reach a response
+  are rounded to `int`, and rounding is `round-half-up` at the single point of conversion.
+
+## 4. The baseline model
+
+### 4.1 `models/baseline/types.py`
+
+```python
+from datetime import date, datetime
+from enum import StrEnum
+from pydantic import BaseModel, ConfigDict, Field
+
+class Verdict(StrEnum):
+    BOOK_NOW = "book_now"
+    WAIT = "wait"
+    NEUTRAL = "neutral"
+
+class Confidence(StrEnum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+class PriceSource(StrEnum):
+    USER_SUPPLIED = "user_supplied"
+    STORE = "store"
+
+class Money(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")
+
+class TripShape(BaseModel):
+    """The MVP trip shape (L0 §8): one-way, economy, 1 passenger. Field names and types
+    are the canonical ones from L0 §3."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    origin: IataCode
+    destination: IataCode
+    depart_date: date
+    trip_type: TripType = TripType.ONE_WAY
+    cabin: Cabin = Cabin.ECONOMY
+    passengers: int = Field(default=1, ge=1)
+    return_date: date | None = None
+
+    @property
+    def route_key(self) -> str: ...   # f"{origin}-{destination}" (L0 §2)
+
+class CurrentPrice(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    amount_minor: int = Field(gt=0)
+    currency: str
+    source: PriceSource
+    as_of: datetime            # tz-aware UTC
+
+class CurvePoint(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    days_to_departure: int = Field(ge=0)
+    amount_minor: int = Field(gt=0)
+
+class ExpectedLow(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    amount_minor: int = Field(gt=0)
+    currency: str
+    window_start: date
+    window_end: date           # window_end >= window_start, validated
+
+class Basis(BaseModel):
+    """Everything the numbers were computed from — the 'why' panel and the audit trail."""
+    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+    observations: int                       # rows in the (route, AP bucket) cell
+    route_observations: int                 # rows for the whole route in the window
+    from_: date = Field(alias="from")       # min(fetched_date) actually used
+    to: date = Field(alias="to")            # max(fetched_date) actually used
+    sources: list[str]                      # distinct `source` values, sorted
+    ap_bucket: str
+    travel_month: int
+    travel_dow: int
+    cov: float | None
+    dropped_currency_mismatch: int = 0
+
+class Prediction(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    trip_shape: TripShape
+    current_price: CurrentPrice
+    price_percentile: int = Field(ge=0, le=100)
+    verdict: Verdict
+    expected_curve: list[CurvePoint]
+    expected_low: ExpectedLow | None
+    confidence: Confidence
+    reason: str
+    basis: Basis
+    data_quality_note: str | None = None
+```
+
+`Basis` uses `from` as a wire name via an alias because it is a Python keyword; SF-07
+serialises `by_alias=True` so the JSON matches SF-07's documented payload exactly.
+
+### 4.2 `models/baseline/percentile.py`
+
+```python
+def percentile_of(amount_minor: int, sample: pl.Series | Sequence[int]) -> int:
+    """Percentile RANK of amount_minor within sample, as an int in [0, 100].
+
+    Definition, pinned (L0 and SF-06 leave the direction implicit; SF-07's example payload
+    'price_percentile: 34' + 'cheaper than 66% of the last year' fixes it):
+
+        percentile = round(100 * (below + 0.5 * equal) / n)
+
+    where `below` counts sample values strictly less than amount_minor and `equal` counts
+    values equal to it. LOW MEANS CHEAP. A price cheaper than everything scores 0; a price
+    dearer than everything scores 100. "Cheaper than X% of history" = 100 - percentile.
+
+    n == 0 raises ValueError; callers check cell size first.
+    """
+```
+
+The mid-rank (`+ 0.5 * equal`) term matters on this fixture: prices are rounded to whole
+currency units, so exact ties are common and a strict `below / n` would systematically
+under-report. It is also what makes SF-06's calibration bullet ("a p90 call is beaten ~10% of
+the time") hold.
+
+### 4.3 `models/baseline/curve.py`
+
+```python
+def expected_curve(
+    *,
+    trip_shape: TripShape,
+    as_of: date,
+    distribution: pl.DataFrame,          # from build_distribution()
+    bucket_distribution: pl.DataFrame,   # from build_bucket_distribution()
+    config: BaselineConfig,
+) -> list[CurvePoint]:
+    """The expected cheapest price for each remaining day before departure."""
+```
+
+**Pinned semantics — read this before implementing.**
+
+`depart_date` is **fixed** by the request. `travel_month` and `travel_dow` are therefore
+derived once from `trip_shape.depart_date` and are constant across the whole curve. The only
+thing that varies as the curve advances is `days_to_departure`, and through it `ap_bucket`.
+Do **not** vary the departure date along the curve — that would answer a different question
+("what if I flew a different day"), not SF-06's.
+
+1. `dtd_now = (trip_shape.depart_date - as_of).days`. If `dtd_now < 0`, return `[]`.
+2. The curve covers `days_to_departure` from `dtd_now` down to `max(0, dtd_now - config.curve.horizon_days)`, inclusive, **descending** — literally "the next 90 days". For a departure 30 days out the curve is 31 points (30 → 0), not 91.
+3. Raw value at each `dtd`: the `median` of the `(route, ap_bucket(dtd), travel_month, travel_dow)` row of `distribution`. If that cell has `count < config.curve.min_cell_observations` (or is missing), fall back to the `(route, ap_bucket(dtd))` row of `bucket_distribution`. If that is missing too, the point is omitted.
+4. Because `ap_bucket` is a step function of `dtd`, the raw series is a **staircase of at most 9 distinct values**. This is why SF-06 says "smoothed".
+5. Smoothing: a centred rolling mean of width `config.curve.smoothing_window_days` over the raw series ordered by ascending `dtd`, with shrinking windows at both ends (`min_periods=1`) so the endpoints are not dropped. Output is rounded to `int` minor units at this single point.
+6. The result is a daily series with the bucket steps blended into ramps — monotone within each step, continuous across step boundaries.
+
+```python
+def find_expected_low(
+    curve: Sequence[CurvePoint], *, as_of: date, depart_date: date, config: BaselineConfig,
+    currency: str,
+) -> ExpectedLow | None:
+    """Minimum of the curve restricted to the next config.verdict.wait.search_horizon_days
+    days — i.e. days_to_departure in [dtd_now - horizon, dtd_now]. Returns None when the
+    curve is empty or its minimum is the current point (dtd_now) itself.
+
+    window_start / window_end are CALENDAR dates: the contiguous run of days whose curve
+    value is within 1% of the minimum, mapped back via
+    calendar_date = depart_date - days_to_departure. window_start <= window_end always.
+    """
+```
+
+The 1%-of-minimum band turns a single argmin day into the usable booking window SF-07's
+payload and SF-08's banner both want, instead of a one-day point estimate.
+
+### 4.4 `models/baseline/verdict.py`
+
+```python
+def decide_verdict(
+    *, price_percentile: int, current_amount_minor: int, curve: Sequence[CurvePoint],
+    as_of: date, depart_date: date, config: BaselineConfig,
+) -> Verdict:
+    """SF-06's rules, with every comparison pinned:
+
+    book_now  price_percentile <= verdict.book_now.max_percentile
+              AND max(curve value over the whole curve) >= current * (1 + min_curve_rise_pct/100)
+              ("the curve rises >= 5% from here")
+
+    wait      price_percentile >= verdict.wait.min_percentile
+              AND min(curve value over days_to_departure in [dtd_now - search_horizon_days,
+                  dtd_now]) <= current * (1 - min_curve_drop_pct/100)
+
+    neutral   otherwise, and unconditionally when the curve is empty.
+
+    book_now is evaluated first. The two conditions cannot both hold (percentile <= 25 and
+    >= 60 are disjoint), so order is documentation, not tie-breaking.
+    """
+
+def decide_confidence(*, cell_observations: int, cov: float | None,
+                      config: BaselineConfig) -> Confidence:
+    """low   if cell_observations < confidence.low.max_observations
+                OR (cov is not None AND cov > confidence.low.max_cov)
+       high  if cell_observations >= confidence.high.min_observations
+                AND cov is not None AND cov < confidence.high.max_cov
+       medium otherwise.
+       `low` is checked first: SF-06 lists it first and it is the safe direction."""
+
+def build_reason(*, verdict: Verdict, price_percentile: int, confidence: Confidence,
+                 expected_low: ExpectedLow | None, current_amount_minor: int,
+                 basis: Basis, trip_shape: TripShape) -> str:
+    """A plain-language sentence assembled from the numbers. No LLM, no randomness —
+    same inputs, same string.
+
+    Templates (the only three; {} are substituted, nothing else varies):
+
+    book_now:
+      "This fare is cheaper than {100 - price_percentile}% of the {n} observations we have
+       for {route_key} booked {ap_bucket} days out, and prices on this route usually rise
+       about {rise_pct}% from here. Book now."
+
+    wait:
+      "This fare is cheaper than {100 - price_percentile}% of the {n} observations we have
+       for {route_key} booked {ap_bucket} days out, but prices on this route usually dip
+       about {drop_pct}% around {window_start:%-d %b}-{window_end:%-d %b}. Waiting looks
+       better."
+
+    neutral:
+      "This fare is cheaper than {100 - price_percentile}% of the {n} observations we have
+       for {route_key} booked {ap_bucket} days out, and we do not see a clear move either
+       way in the next {horizon} days."
+
+    The observation count and route come from `basis`; the sentence NEVER claims a period
+    ("the last year") that basis.from_/basis.to does not cover. See
+    specs/implementation/README.md open question 2.
+    """
+```
+
+### 4.5 `models/baseline/predictor.py`
+
+```python
+def latest_observed_price(
+    trip_shape: TripShape, *, as_of: date | None = None, store: SnapshotStore | None = None,
+) -> CurrentPrice | None:
+    """The cheapest observation for this exact (route_key, depart_date) at the most recent
+    fetched_date at or before as_of, after the prefer-itinerary collapse. `as_of` defaults
+    to today (UTC). Returns None when the store has nothing for that trip shape.
+
+    source = PriceSource.STORE; as_of = that row's fetched_at.
+    This lives in models/, not api/, so SF-07 and the backtest resolve 'the current price'
+    identically."""
+
+def predict(
+    trip_shape: TripShape,
+    current_price: Money | None = None,
+    *,
+    as_of: date | None = None,
+    config: BaselineConfig | None = None,
+    store: SnapshotStore | None = None,
+) -> Prediction:
+    """SF-06's entry point. Never raises for thin or missing data — it returns a
+    Prediction with verdict=neutral, confidence=low and a populated data_quality_note.
+
+    Order of operations:
+      1. as_of  <- as_of or today (UTC). config <- config or load_baseline_config().
+      2. history <- load_route_history(trip_shape.route_key, as_of=as_of, ...)
+      3. resolved <- current_price (source=user_supplied) or latest_observed_price(...)
+         If both are absent -> return the thin-data Prediction, note
+         "No observed price for this route and date." price_percentile = 50,
+         expected_curve = [], expected_low = None.
+      4. distribution / bucket_distribution from history.
+      5. cell <- bucket_distribution row for (route_key, ap_bucket(dtd_now))
+         If missing or cell.count < history.min_cell_observations ->
+         thin-data Prediction, note "Only {n} observations for this route at this booking
+         window; not enough to call it." Curve is still returned when it can be built.
+      6. price_percentile <- percentile_of(resolved.amount_minor, cell sample)
+      7. expected_curve <- expected_curve(...); expected_low <- find_expected_low(...)
+      8. verdict <- decide_verdict(...); confidence <- decide_confidence(...)
+      9. expected_low is set on the response ONLY when verdict is `wait` (SF-06's table
+         says "if wait"); otherwise None.
+     10. basis <- Basis(...); reason <- build_reason(...)
+
+    Deterministic: same store contents + same as_of + same config -> byte-identical
+    Prediction. No wall-clock read anywhere except the as_of default.
+    """
+```
+
+`predict()` is pure with respect to its arguments — it never reads `datetime.now()` after
+step 1 — so SF-07 can cache on `(trip_shape, current_price, as_of_date)` safely.
+
+## 5. Backtest harness
+
+```python
+# models/backtest/metrics.py
+class BacktestSample(BaseModel):
+    route_key: str
+    depart_date: date
+    as_of: date
+    days_to_departure: int
+    verdict: Verdict
+    confidence: Confidence
+    price_percentile: int
+    price_now_minor: int
+    best_future_minor: int      # min observed price over the scored window
+    paid_minor: int             # price_now if book_now; best_future if wait/neutral-as-book
+    regret_minor: int           # paid_minor - min(price_now, best_future)
+
+class BacktestReport(BaseModel):
+    generated_at: datetime
+    config_digest: str            # sha256 of the serialised BaselineConfig, for traceability
+    fixture_mode: bool
+    samples: int
+    horizon_days: int
+    hit_rate: float               # over book_now + wait samples only
+    hit_rate_always_book_now: float   # same samples, verdict forced to book_now
+    hit_rate_by_verdict: dict[str, float]
+    verdict_counts: dict[str, int]
+    mean_regret_minor: float
+    median_regret_minor: float
+    percentile_calibration: list[CalibrationBin]   # 10 deciles
+    by_route: dict[str, RouteMetrics]
+
+class CalibrationBin(BaseModel):
+    decile: int                   # 0..9, predicted percentile band
+    predicted_mid: float          # 5, 15, ... 95
+    realised_fraction_cheaper: float  # fraction of window prices above the scored price
+    samples: int
+```
+
+```python
+# models/backtest/harness.py
+def run_backtest(
+    *,
+    routes: Sequence[str] | None = None,     # default: every route in the store
+    config: BaselineConfig | None = None,
+    store: SnapshotStore | None = None,
+    stride_days: int | None = None,          # default: config.backtest.stride_days
+    horizon_days: int | None = None,         # default: config.backtest.horizon_days
+) -> BacktestReport: ...
+
+def write_report(report: BacktestReport, path: Path | None = None) -> Path:
+    """Writes JSON to config.backtest.report_path. Sorted keys, 2-space indent, trailing
+    newline, so a regenerated report diffs cleanly. E8's accuracy page reads this file."""
+
+def main(argv: list[str] | None = None) -> int:
+    """`uv run python -m models.backtest` — runs and writes the report. --routes, --stride,
+    --horizon, --out."""
+```
+
+**Scoring, pinned** (SF-06 names the metrics but not the rule):
+
+For each sampled `(route_key, depart_date, as_of)` where `as_of` steps by `stride_days`
+across the available `fetched_date` range and `1 <= dtd_now`:
+
+- The model sees only rows with `fetched_date <= as_of` (walk-forward; enforced by passing
+  `as_of` through to `load_route_history`, and asserted by a test).
+- `price_now` = the collapsed observation for `(route, depart_date, as_of)`.
+- `best_future` = min collapsed price for `(route, depart_date)` over
+  `fetched_date` in `(as_of, min(as_of + horizon_days, depart_date)]`. Samples with no
+  future observation are skipped.
+- A `book_now` is a **hit** when `price_now <= best_future`. A `wait` is a hit when
+  `best_future < price_now`. `neutral` samples are counted in `verdict_counts` and excluded
+  from `hit_rate`.
+- `hit_rate_always_book_now` scores the **same sample set** with every verdict forced to
+  `book_now`. This is the comparator SF-06's Done-when bullet requires; comparing against a
+  different sample set would not be a comparison.
+- `regret_minor` = what you paid minus the best you could have got, so a correct call has
+  zero regret.
+- Calibration: bin samples by predicted `price_percentile` decile; within a bin,
+  `realised_fraction_cheaper` is the mean fraction of that trip's window prices that are
+  **above** the scored price. A calibrated p90 has ~0.10.
+
+## 6. Test list — mapped to SF-06's Done when
+
+| SF-06 "Done when" bullet | Test |
+|---|---|
+| `predict()` returns a fully populated `Prediction` for every route in the fixture set | `tests/models/test_predict.py::test_predict_all_fixture_routes` (parametrised over the 15 route keys × 3 departure dates at dtd 10 / 45 / 100; asserts every field non-null, `expected_curve` non-empty, `basis.observations > 0`), `::test_predict_is_deterministic`, `::test_predict_without_current_price_uses_store`, `::test_predict_never_raises_on_unknown_route` |
+| Percentiles are calibrated on the fixture data (a p90 call is beaten ~10% of the time) | `tests/models/test_backtest.py::test_percentile_calibration_within_tolerance` (every decile's `realised_fraction_cheaper` within ±0.08 of `1 - predicted_mid/100`; the p90 bin asserted tighter, ±0.05), `tests/models/test_percentile.py::test_rank_definition`, `::test_ties_use_midrank`, `::test_low_percentile_means_cheap` |
+| Backtest hit rate better than always-`book_now` | `tests/models/test_backtest.py::test_beats_always_book_now` (`report.hit_rate > report.hit_rate_always_book_now`), `::test_same_sample_set_for_both_arms`, `::test_walk_forward_never_reads_the_future` (monkeypatches `load_route_history` and asserts no call receives `as_of` beyond the sample's) |
+| `reason` and `basis` are populated and consistent with the numeric outputs | `tests/models/test_predict.py::test_reason_matches_verdict_template`, `::test_reason_percentile_matches_field` (the "cheaper than X%" in the string equals `100 - price_percentile`), `::test_reason_never_claims_a_period_outside_basis`, `::test_basis_counts_match_cell_size`, `::test_basis_sources_match_rows_used`, `::test_basis_from_to_within_history_window` |
+| Everything works with `SNAP_USE_FIXTURES=1` and no `data/snapshots/` | `tests/models/conftest.py` builds every store fixture that way; `tests/models/test_predict.py::test_works_in_fixture_mode_with_no_snapshots_dir` asserts the directory is absent and the call still succeeds |
+| All thresholds are config-driven | `tests/models/test_config.py::test_defaults_match_sf06_spec` (25 / 5.0 / 60 / 7.0 / 100 / 0.35 / 500 / 0.18), `::test_unknown_key_is_rejected`, `::test_missing_key_is_rejected`, `tests/models/test_verdict.py::test_lowering_book_now_threshold_changes_verdict`, `::test_raising_confidence_floor_changes_confidence`, `tests/models/test_predict.py::test_no_threshold_literals_in_module_source` (greps `models/baseline/*.py` for the eight threshold literals and fails if any appears outside `config.py`) |
+
+Supporting tests:
+
+| Test | Asserts |
+|---|---|
+| `test_buckets.py::test_bucket_boundaries` | 0→`0-3`, 3→`0-3`, 4→`4-7`, 90→`61-90`, 91→`90+`, 400→`90+` |
+| `test_buckets.py::test_expr_matches_scalar` | `ap_bucket_expr()` equals `ap_bucket()` for every value 0..400 |
+| `test_buckets.py::test_negative_raises` | `ap_bucket(-1)` raises `ValueError` |
+| `test_observations.py::test_prefer_itinerary_collapse` | on a tier-1 route the itinerary row wins over the calendar row for the same (depart, fetched) |
+| `test_observations.py::test_collapse_is_one_row_per_group` | group counts are all 1 |
+| `test_observations.py::test_derived_columns` | `days_to_departure`, `travel_month`, `travel_dow` correct for a known date; `travel_dow` is Mon=0 |
+| `test_observations.py::test_travel_month_dow_come_from_depart_not_fetched` | the trap the curve depends on |
+| `test_observations.py::test_history_window_respected` | rows older than `window_days` are excluded |
+| `test_observations.py::test_frame_schema_is_frozen` | `OBSERVATION_FRAME_COLUMNS` exactly |
+| `test_distributions.py::test_cell_counts_match_sf03_build_table` | per-(route, AP bucket) counts equal `SF-03-build.md` §8 |
+| `test_distributions.py::test_cov_null_on_single_row` | |
+| `test_distributions.py::test_percentiles_ordered` | p10 ≤ p25 ≤ median ≤ p75 ≤ p90 for every cell |
+| `test_curve.py::test_curve_length_short_horizon` | departure 30 days out → 31 points |
+| `test_curve.py::test_curve_length_long_horizon` | departure 200 days out → 91 points, ending at dtd 110 |
+| `test_curve.py::test_curve_is_descending_in_dtd` | first point is `dtd_now` |
+| `test_curve.py::test_month_and_dow_constant_across_curve` | asserts the distribution lookup uses one (month, dow) pair |
+| `test_curve.py::test_smoothing_removes_the_staircase` | raw series has ≤ 9 distinct values, smoothed has more, and endpoints survive |
+| `test_curve.py::test_falls_back_to_bucket_median_on_thin_cell` | |
+| `test_curve.py::test_expected_low_window_is_a_contiguous_calendar_range` | `window_start <= window_end`, both map back through `depart_date - dtd` |
+| `test_curve.py::test_expected_low_none_when_minimum_is_now` | |
+| `test_curve.py::test_error_fares_do_not_move_expected_low` | injects the 12 fixture outliers' route/date and asserts the curve is unchanged (medians, never minima) |
+| `test_verdict.py::test_book_now_rule`, `::test_wait_rule`, `::test_neutral_when_neither`, `::test_neutral_on_empty_curve` | the three rules, at and either side of each threshold |
+| `test_verdict.py::test_confidence_bands` | `(99, 0.1) -> low`, `(270, 0.1) -> medium`, `(600, 0.1) -> high`, `(600, 0.4) -> low`, `(600, None) -> medium` |
+| `test_verdict.py::test_fixture_short_buckets_cap_at_medium` | `0-3` and `4-7` never return `high` on the fixture (matches `SF-03-build.md` §8) |
+| `test_predict.py::test_expected_low_only_set_when_wait` | |
+| `test_predict.py::test_thin_data_note_shape` | thin cell → `neutral` / `low` / non-null note / HTTP-safe (no raise) |
+| `test_backtest.py::test_report_json_is_stable` | two runs produce byte-identical JSON |
+| `test_backtest.py::test_report_written_to_configured_path` | |
+
+## 7. Out of scope
+
+Everything SF-06 lists (trained model, quantile regression, SHAP, HTTP, UI), plus: no writes
+to the store, no `config/routes.yaml`, no route metadata — SF-06 works from `route_key`
+alone and never needs to know a route's region or tier.
+
+## 8. Interfaces frozen for downstream (what SF-07 may assume about SF-06)
+
+1. `from models.baseline import predict, latest_observed_price, TripShape, Money,
+   CurrentPrice, Prediction, CurvePoint, ExpectedLow, Basis, Verdict, Confidence,
+   PriceSource, BaselineConfig, load_baseline_config`.
+2. `predict(trip_shape, current_price=None, *, as_of=None, config=None, store=None)
+   -> Prediction` **never raises** for thin data, an unknown route, an empty store, or a
+   departure date outside the fixture range. It raises only for a malformed `TripShape`,
+   which SF-07 has already rejected with a 400.
+3. `Prediction` is a Pydantic v2 model. `Prediction.model_dump(mode="json", by_alias=True)`
+   produces JSON-ready values (dates as ISO strings, `basis.from_` serialised as `from`).
+   SF-07 nests it, it does not re-derive it.
+4. `price_percentile` is an `int` in `[0, 100]` where **low means cheap**. SF-07's `reason`
+   and any UI must read "cheaper than `100 - price_percentile`% of history".
+5. `expected_curve` is ordered **descending** by `days_to_departure`, starts at `dtd_now`,
+   and has at most `config.curve.horizon_days + 1` points. It is `[]` only when the
+   departure date is in the past or the route has no usable history.
+6. `expected_low` is non-`None` **iff** `verdict == "wait"`.
+7. Thin data and unknown routes come back as `verdict="neutral"`, `confidence="low"`,
+   `data_quality_note` non-`None`. SF-07 maps this straight to its documented `200`
+   response — no special-casing in `api/`.
+8. `latest_observed_price(trip_shape, as_of=None, store=None) -> CurrentPrice | None` is
+   the only sanctioned way to fill an omitted `current_price`. SF-07 must not query the
+   store itself.
+9. `predict()` reads the clock exactly once (the `as_of` default), so caching on
+   `(trip_shape, current_price, as_of)` is sound.
+10. `config/baseline.yaml` is SF-06's file. SF-07 reads it only through
+    `load_baseline_config()` and puts its own settings in `config/api.yaml`.
+11. Confidence on the committed fixture: the `0-3` and `4-7` AP buckets cap at `medium`
+    (270 / 360 observations vs. a 500 floor). SF-07's `GET /routes` must report that
+    honestly rather than assuming every route can reach `high`.
+
+## 9. Ordered commit plan
+
+| # | Message | Contains |
+|---|---|---|
+| 1 | `Add the baseline config file and its loader` | `config/baseline.yaml`, `models/baseline/config.py`, `tests/models/test_config.py` |
+| 2 | `Bucket days-to-departure for the feature builders` | `models/features/buckets.py`, `tests/models/test_buckets.py` |
+| 3 | `Load route history and collapse to one row per day` | `models/features/observations.py`, `tests/models/conftest.py`, `tests/models/test_observations.py` |
+| 4 | `Build the trailing price distributions` | `models/features/distributions.py`, `tests/models/test_distributions.py` |
+| 5 | `Add the percentile rank and the prediction types` | `models/baseline/types.py`, `percentile.py`, `tests/models/test_percentile.py` |
+| 6 | `Build and smooth the 90-day expected curve` | `models/baseline/curve.py`, `tests/models/test_curve.py` |
+| 7 | `Decide the verdict, confidence and reason` | `models/baseline/verdict.py`, `tests/models/test_verdict.py` |
+| 8 | `Wire it together behind predict()` | `models/baseline/predictor.py`, `__init__.py` files, `tests/models/test_predict.py` |
+| 9 | `Score the baseline with a walk-forward backtest` | `models/backtest/**`, `tests/models/test_backtest.py`, the first `reports/latest.json` |
+
+Push after each. Commits 1–4 are the feature layer and can be reviewed without reading the
+model; 9 is the only one that commits a generated artefact.
