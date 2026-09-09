@@ -1,0 +1,40 @@
+[project]
+name = "snap-flights"
+version = "0.1.0"
+description = "Flight search with price prediction as the headline feature."
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.1,<2",
+    "fastapi>=0.115,<1",
+    "polars>=1.9,<2",
+    "pyarrow>=17.0,<18",
+    "pydantic>=2.9,<3",
+    "pyyaml>=6.0,<7",
+    "uvicorn[standard]>=0.31,<1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27,<1",
+    "pytest>=8.3,<9",
+    "ruff>=0.6,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: takes more than a second (fixture regeneration, backtest)",
+]

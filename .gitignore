@@ -11,3 +11,10 @@ __pycache__/
 dist/
 build/
 .DS_Store
+
+# test / lint caches and generated reports
+.pytest_cache/
+.ruff_cache/
+.coverage
+models/backtest/reports/*.json
+!models/backtest/reports/latest.json
