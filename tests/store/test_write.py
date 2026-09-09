@@ -128,3 +128,20 @@ def test_empty_batch_is_a_no_op(tmp_path: Path) -> None:
     assert (result.files_written, result.records_written, result.duplicates_dropped) == (0, 0, 0)
     assert result.paths == []
     assert not store.snapshots_root.exists()
+
+
+def test_rewrite_same_batch_is_idempotent_on_read(tmp_path: Path) -> None:
+    """Physical duplicate part files are fine; read-time dedup collapses them (L0 §6)."""
+    store = store_at(tmp_path)
+    records = [make_observation(route_key="JFK-LHR"), make_observation(route_key="LHR-JFK")]
+
+    store.write(records)
+    store.write(records)
+    store.write(records)
+
+    assert len(part_files(store.snapshots_root)) == 6
+    read_back = store.read()
+    assert len(read_back) == 2
+    assert sorted(record.observation_id for record in read_back) == sorted(
+        record.observation_id for record in records
+    )
