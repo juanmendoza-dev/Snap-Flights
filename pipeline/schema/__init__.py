@@ -1,5 +1,11 @@
 """The canonical fare-observation schema — the single source of truth (L0 §3)."""
 
+from pipeline.schema.arrow import (
+    COLUMN_ORDER,
+    FARE_OBSERVATION_ARROW_SCHEMA,
+    records_to_table,
+    table_to_records,
+)
 from pipeline.schema.enums import (
     Cabin,
     DataQuality,
@@ -19,6 +25,8 @@ from pipeline.schema.validation import (
 )
 
 __all__ = [
+    "COLUMN_ORDER",
+    "FARE_OBSERVATION_ARROW_SCHEMA",
     "NATURAL_KEY_FIELDS",
     "SCHEMA_VERSION",
     "BatchReport",
@@ -34,6 +42,8 @@ __all__ = [
     "build_observation",
     "natural_key",
     "observation_id",
+    "records_to_table",
+    "table_to_records",
     "validate",
     "validate_batch",
 ]
