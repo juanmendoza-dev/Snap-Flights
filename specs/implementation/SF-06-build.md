@@ -259,6 +259,9 @@ from datetime import date, datetime
 from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
+from pipeline.schema import Cabin, TripType
+from pipeline.schema.record import IataCode
+
 class Verdict(StrEnum):
     BOOK_NOW = "book_now"
     WAIT = "wait"

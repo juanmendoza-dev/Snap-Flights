@@ -848,7 +848,7 @@ before a line of SF-06 is written.
 
 | AP bucket | dtd values in grid | rows per route (× 90 fetched dates) | reachable confidence |
 |---|---|---|---|
-| `0-3` | 1–3 | **270** | `low` (< 100 is the low trigger; 270 ≥ 100 but < 500 → `medium` at best) |
+| `0-3` | 1–3 | **270** | `medium` at best (≥ 100 so not forced `low`, < 500 so never `high`) |
 | `4-7` | 4–7 | **360** | `medium` at best |
 | `8-14` | 8–14 | **630** | `high` possible |
 | `15-21` | 15–21 | **630** | `high` possible |
