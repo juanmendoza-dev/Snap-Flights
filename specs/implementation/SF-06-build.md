@@ -318,7 +318,9 @@ class ExpectedLow(BaseModel):
 class Basis(BaseModel):
     """Everything the numbers were computed from — the 'why' panel and the audit trail."""
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
-    observations: int                       # rows in the (route, AP bucket) cell
+    observations: int                       # rows in the (route, AP BUCKET) cell — the
+                                            # sample price_percentile was ranked in, NOT the
+                                            # whole route (that is route_observations)
     route_observations: int                 # rows for the whole route in the window
     from_: date = Field(alias="from")       # min(fetched_date) actually used
     to: date = Field(alias="to")            # max(fetched_date) actually used
@@ -401,21 +403,37 @@ Do **not** vary the departure date along the curve — that would answer a diffe
 
 ```python
 def find_expected_low(
-    curve: Sequence[CurvePoint], *, as_of: date, depart_date: date, config: BaselineConfig,
-    currency: str,
+    curve: Sequence[CurvePoint], *, depart_date: date, config: BaselineConfig, currency: str,
 ) -> ExpectedLow | None:
     """Minimum of the curve restricted to the next config.verdict.wait.search_horizon_days
-    days — i.e. days_to_departure in [dtd_now - horizon, dtd_now]. Returns None when the
-    curve is empty or its minimum is the current point (dtd_now) itself.
+    days — i.e. days_to_departure in [dtd_now - horizon, dtd_now], where dtd_now is the
+    first (highest) days_to_departure in `curve`.
 
-    window_start / window_end are CALENDAR dates: the contiguous run of days whose curve
-    value is within 1% of the minimum, mapped back via
-    calendar_date = depart_date - days_to_departure. window_start <= window_end always.
+    Returns None ONLY when `curve` is empty. It does not second-guess the verdict: whether
+    an expected low is worth showing is decided once, in predict() step 9.
+
+    window_start / window_end are CALENDAR dates, mapped back via
+    calendar_date = depart_date - days_to_departure. The window is the contiguous run of
+    days CONTAINING THE ARGMIN whose curve value is within 1% of the minimum; on a tie the
+    argmin with the largest days_to_departure (the earliest calendar date) wins.
+    window_start <= window_end always.
     """
 ```
 
+`as_of` is deliberately **not** a parameter: `dtd_now` is already the first point of `curve`,
+and taking both would let a caller pass an inconsistent pair and get silent nonsense.
+
 The 1%-of-minimum band turns a single argmin day into the usable booking window SF-07's
-payload and SF-08's banner both want, instead of a one-day point estimate.
+payload and SF-08's banner both want, instead of a one-day point estimate. "Contiguous run
+containing the argmin" is pinned because a smoothed U-shaped curve can have two separate runs
+inside the 1% band, which would otherwise leave the window implementation-defined.
+
+**Why this returns a value even when the verdict will not be `wait`.** `decide_verdict`
+compares the window minimum against the **user's current price**; the curve's own minimum
+could sit at `dtd_now` while still being far below that price. If `find_expected_low` also
+tried to decide, the two rules could disagree and `expected_low is not None iff verdict ==
+"wait"` (§8.6) would break. One decision point, in `predict()`, makes that guarantee true by
+construction.
 
 ### 4.4 `models/baseline/verdict.py`
 
@@ -517,10 +535,11 @@ def predict(
          thin-data Prediction, note "Only {n} observations for this route at this booking
          window; not enough to call it." Curve is still returned when it can be built.
       6. price_percentile <- percentile_of(resolved.amount_minor, cell sample)
-      7. expected_curve <- expected_curve(...); expected_low <- find_expected_low(...)
+      7. expected_curve <- expected_curve(...)
       8. verdict <- decide_verdict(...); confidence <- decide_confidence(...)
-      9. expected_low is set on the response ONLY when verdict is `wait` (SF-06's table
-         says "if wait"); otherwise None.
+      9. expected_low <- find_expected_low(...) if verdict is `wait`, else None. This is
+         the ONLY place that decision is made (SF-06's table says "if wait"), which is what
+         makes the iff in §8.6 hold by construction.
      10. basis <- Basis(...); reason <- build_reason(...)
 
     Deterministic: same store contents + same as_of + same config -> byte-identical
@@ -607,11 +626,26 @@ across the available `fetched_date` range and `1 <= dtd_now`:
 - `hit_rate_always_book_now` scores the **same sample set** with every verdict forced to
   `book_now`. This is the comparator SF-06's Done-when bullet requires; comparing against a
   different sample set would not be a comparison.
+
+**If the baseline does not beat always-`book_now` on the first run.** The knobs are in the
+*fixture*, not the model: the rising/dip split and the trough depth in `SF-03-build.md` §4.3
+are what give `wait` anything to win on. Widen the dip fraction or deepen the trough and
+regenerate the fixture (a reviewed change, per L0 §7). Do **not** move the thresholds in
+`config/baseline.yaml` to make the comparator lose — that is fitting the model to its own
+test, and the numbers in that file are SF-06's published rules.
+
+**Calibration tolerances** in §6 are provisional: set them from the first clean run, tighten
+them to the observed spread plus headroom, and record the run's numbers in the commit
+message. A tolerance nobody has measured is a test that fails for reasons unrelated to a bug.
 - `regret_minor` = what you paid minus the best you could have got, so a correct call has
   zero regret.
 - Calibration: bin samples by predicted `price_percentile` decile; within a bin,
-  `realised_fraction_cheaper` is the mean fraction of that trip's window prices that are
-  **above** the scored price. A calibrated p90 has ~0.10.
+  `realised_fraction_cheaper` is the mean fraction of **the same (route, AP bucket) trailing
+  cell the percentile was ranked in** whose prices are above the scored price. Scoring the
+  percentile against the sample it came from is the only way the two are comparable — a
+  forward-looking "fraction of this trip's future window prices" measures a different
+  distribution and would not agree decile-by-decile even with a correct implementation. A
+  calibrated p90 bin has ~0.10.
 
 ## 6. Test list — mapped to SF-06's Done when
 
@@ -622,7 +656,7 @@ across the available `fetched_date` range and `1 <= dtd_now`:
 | Backtest hit rate better than always-`book_now` | `tests/models/test_backtest.py::test_beats_always_book_now` (`report.hit_rate > report.hit_rate_always_book_now`), `::test_same_sample_set_for_both_arms`, `::test_walk_forward_never_reads_the_future` (monkeypatches `load_route_history` and asserts no call receives `as_of` beyond the sample's) |
 | `reason` and `basis` are populated and consistent with the numeric outputs | `tests/models/test_predict.py::test_reason_matches_verdict_template`, `::test_reason_percentile_matches_field` (the "cheaper than X%" in the string equals `100 - price_percentile`), `::test_reason_never_claims_a_period_outside_basis`, `::test_basis_counts_match_cell_size`, `::test_basis_sources_match_rows_used`, `::test_basis_from_to_within_history_window` |
 | Everything works with `SNAP_USE_FIXTURES=1` and no `data/snapshots/` | `tests/models/conftest.py` builds every store fixture that way; `tests/models/test_predict.py::test_works_in_fixture_mode_with_no_snapshots_dir` asserts the directory is absent and the call still succeeds |
-| All thresholds are config-driven | `tests/models/test_config.py::test_defaults_match_sf06_spec` (25 / 5.0 / 60 / 7.0 / 100 / 0.35 / 500 / 0.18), `::test_unknown_key_is_rejected`, `::test_missing_key_is_rejected`, `tests/models/test_verdict.py::test_lowering_book_now_threshold_changes_verdict`, `::test_raising_confidence_floor_changes_confidence`, `tests/models/test_predict.py::test_no_threshold_literals_in_module_source` (greps `models/baseline/*.py` for the eight threshold literals and fails if any appears outside `config.py`) |
+| All thresholds are config-driven | `tests/models/test_config.py::test_defaults_match_sf06_spec` (25 / 5.0 / 60 / 7.0 / 100 / 0.35 / 500 / 0.18), `::test_unknown_key_is_rejected`, `::test_missing_key_is_rejected`, `tests/models/test_verdict.py::test_lowering_book_now_threshold_changes_verdict`, `::test_raising_confidence_floor_changes_confidence`, `tests/models/test_predict.py::test_no_threshold_literals_in_module_source` (greps `models/baseline/curve.py` and `verdict.py` for the float forms `5.0`, `7.0`, `0.35`, `0.18` and fails if any appears; the integer thresholds are not grepped because `100` and `60` legitimately occur in percentile and date arithmetic) |
 
 Supporting tests:
 
@@ -647,7 +681,8 @@ Supporting tests:
 | `test_curve.py::test_smoothing_removes_the_staircase` | raw series has ≤ 9 distinct values, smoothed has more, and endpoints survive |
 | `test_curve.py::test_falls_back_to_bucket_median_on_thin_cell` | |
 | `test_curve.py::test_expected_low_window_is_a_contiguous_calendar_range` | `window_start <= window_end`, both map back through `depart_date - dtd` |
-| `test_curve.py::test_expected_low_none_when_minimum_is_now` | |
+| `test_curve.py::test_expected_low_none_only_on_empty_curve` | a curve whose minimum is at `dtd_now` still returns an ExpectedLow |
+| `test_curve.py::test_expected_low_window_is_the_run_containing_the_argmin` | a two-trough curve inside the 1% band picks the argmin's run |
 | `test_curve.py::test_error_fares_do_not_move_expected_low` | injects the 12 fixture outliers' route/date and asserts the curve is unchanged (medians, never minima) |
 | `test_verdict.py::test_book_now_rule`, `::test_wait_rule`, `::test_neutral_when_neither`, `::test_neutral_on_empty_curve` | the three rules, at and either side of each threshold |
 | `test_verdict.py::test_confidence_bands` | `(99, 0.1) -> low`, `(270, 0.1) -> medium`, `(600, 0.1) -> high`, `(600, 0.4) -> low`, `(600, None) -> medium` |
