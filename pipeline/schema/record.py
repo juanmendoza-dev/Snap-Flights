@@ -13,6 +13,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pipeline.schema.enums import Cabin, DataQuality, PriceKind, QualityFlag, Source, TripType
+from pipeline.schema.identity import observation_id
 
 SCHEMA_VERSION: int = 1
 
@@ -92,6 +93,75 @@ class FareObservation(BaseModel):
         return self.fetched_at.astimezone(UTC).date()
 
 
+def build_observation(
+    *,
+    source: Source,
+    fetched_at: datetime,
+    origin: str,
+    destination: str,
+    depart_date: date,
+    trip_type: TripType,
+    cabin: Cabin,
+    passengers: int,
+    amount_minor: int,
+    currency: str,
+    price_kind: PriceKind,
+    ingest_run_id: str,
+    return_date: date | None = None,
+    stops_outbound: int | None = None,
+    stops_return: int | None = None,
+    carrier_primary: str | None = None,
+    source_native_id: str | None = None,
+    observed_price_age_seconds: int | None = None,
+    data_quality: DataQuality = DataQuality.OK,
+    quality_flags: list[QualityFlag] | None = None,
+) -> FareObservation:
+    """Derive route_key and observation_id, then construct. The only sanctioned way to
+    create a FareObservation from source data."""
+    if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
+        raise ValueError("naive_timestamp: fetched_at must be timezone-aware UTC")
+    fetched_date = fetched_at.astimezone(UTC).date()
+    route_key = f"{origin}-{destination}"
+    return FareObservation(
+        observation_id=observation_id(
+            source=source,
+            origin=origin,
+            destination=destination,
+            depart_date=depart_date,
+            return_date=return_date,
+            cabin=cabin,
+            passengers=passengers,
+            trip_type=trip_type,
+            stops_outbound=stops_outbound,
+            stops_return=stops_return,
+            carrier_primary=carrier_primary,
+            price_kind=price_kind,
+            fetched_date=fetched_date,
+        ),
+        source=source,
+        source_native_id=source_native_id,
+        fetched_at=fetched_at,
+        observed_price_age_seconds=observed_price_age_seconds,
+        origin=origin,
+        destination=destination,
+        route_key=route_key,
+        depart_date=depart_date,
+        return_date=return_date,
+        trip_type=trip_type,
+        cabin=cabin,
+        passengers=passengers,
+        stops_outbound=stops_outbound,
+        stops_return=stops_return,
+        carrier_primary=carrier_primary,
+        amount_minor=amount_minor,
+        currency=currency,
+        price_kind=price_kind,
+        data_quality=data_quality,
+        quality_flags=quality_flags,
+        ingest_run_id=ingest_run_id,
+    )
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "Cabin",
@@ -105,4 +175,5 @@ __all__ = [
     "RouteKey",
     "Source",
     "TripType",
+    "build_observation",
 ]

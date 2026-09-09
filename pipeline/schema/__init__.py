@@ -8,9 +8,11 @@ from pipeline.schema.enums import (
     Source,
     TripType,
 )
-from pipeline.schema.record import SCHEMA_VERSION, FareObservation
+from pipeline.schema.identity import NATURAL_KEY_FIELDS, natural_key, observation_id
+from pipeline.schema.record import SCHEMA_VERSION, FareObservation, build_observation
 
 __all__ = [
+    "NATURAL_KEY_FIELDS",
     "SCHEMA_VERSION",
     "Cabin",
     "DataQuality",
@@ -19,4 +21,7 @@ __all__ = [
     "QualityFlag",
     "Source",
     "TripType",
+    "build_observation",
+    "natural_key",
+    "observation_id",
 ]
