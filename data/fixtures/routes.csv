@@ -1,0 +1,16 @@
+route_key,origin,destination,region,tier
+ATL-MIA,ATL,MIA,domestic-us,3
+BOS-DUB,BOS,DUB,transatlantic,2
+CDG-FCO,CDG,FCO,intra-europe,3
+JFK-CDG,JFK,CDG,transatlantic,2
+JFK-LAX,JFK,LAX,domestic-us,1
+JFK-LHR,JFK,LHR,transatlantic,1
+LAX-JFK,LAX,JFK,domestic-us,1
+LAX-NRT,LAX,NRT,transpacific,1
+LHR-BCN,LHR,BCN,intra-europe,2
+LHR-JFK,LHR,JFK,transatlantic,1
+MAD-LIS,MAD,LIS,intra-europe,3
+ORD-DEN,ORD,DEN,domestic-us,2
+SEA-ICN,SEA,ICN,transpacific,3
+SFO-HND,SFO,HND,transpacific,2
+SFO-LHR,SFO,LHR,transatlantic,2
