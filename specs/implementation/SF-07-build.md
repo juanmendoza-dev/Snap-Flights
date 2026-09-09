@@ -425,7 +425,7 @@ Supporting tests:
 |---|---|
 | `test_health.py::test_status_ok` | 200, `status == "ok"` |
 | `test_health.py::test_sources_reported` | both fixture sources present, `last_fetched_date == 2026-09-09` |
-| `test_health.py::test_recent_flag_uses_configured_window` | recency is measured from `shared.clock.today_utc()`: both fixture sources are `recent` at the pinned `2026-09-09`, and with `SNAP_TODAY` monkeypatched to `2026-09-20` both go `recent = False` while `last_fetched_date` stays `2026-09-09` |
+| `test_health.py::test_recent_flag_uses_configured_window` | recency is measured from `shared.clock.today_utc()`: at the pinned `2026-09-09` both fixture sources come back with `last_fetched_date == 2026-09-09` and `recent = True`; with `SNAP_TODAY` monkeypatched to `2026-09-20` the window no longer reaches the newest fixture date and the response carries `sources == []` (SF-03's `sources_with_recent_data()` filters, it does not report stale sources), still `200` with `status == "ok"` |
 | `test_health.py::test_routes_loaded_is_15` | |
 | `test_predict_validation.py` | one test per row of the §6 table, asserting status, `error` code and `message`. Runs with `SNAP_TODAY=2026-09-09` (set in `tests/api/conftest.py`), so `depart_date_in_the_past` can post a literal `2026-09-08` and `depart_date_too_far` a literal `2027-09-10` rather than dates computed off the real clock |
 | `test_predict_validation.py::test_depart_date_in_the_past_follows_the_clock_override` | with `monkeypatch.setenv("SNAP_TODAY", "2026-09-20")`, a `depart_date` of `2026-09-15` is now a 400 `depart_date_in_the_past` although it passed under the pinned default — proves the check reads `shared.clock.today_utc()` and not `date.today()` |

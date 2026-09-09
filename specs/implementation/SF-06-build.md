@@ -527,7 +527,9 @@ def predict(
       1. as_of  <- as_of or shared.clock.today_utc(). config <- config or
          load_baseline_config(). This is the only clock read in the whole call.
       2. history <- load_route_history(trip_shape.route_key, as_of=as_of, ...)
-      3. resolved <- current_price (source=user_supplied) or latest_observed_price(...)
+      3. resolved <- current_price (source=user_supplied, as_of = the step-1 as_of date
+         at 00:00:00+00:00 — derived, NOT a second clock read, so the Prediction stays
+         byte-identical for fixed inputs) or latest_observed_price(...)
          If both are absent -> return the thin-data Prediction, note
          "No observed price for this route and date." price_percentile = 50,
          expected_curve = [], expected_low = None.

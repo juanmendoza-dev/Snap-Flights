@@ -254,8 +254,9 @@ stands in.
 - `uv run python scripts/validate_fixtures.py` exits 0 and prints a skip notice.
 - The CI workflow is green on `main`.
 - Every directory in L0 §1 exists in the tree (`data/snapshots/` excepted).
-- `shared/clock.py` exists and `SNAP_TODAY=2026-09-09 uv run python -c "from shared.clock
-  import today_utc; print(today_utc())"` prints `2026-09-09`.
+- `shared/clock.py` exists, and
+  `SNAP_TODAY=2026-09-09 uv run python -c "import shared.clock as c; print(c.today_utc())"`
+  prints `2026-09-09`.
 
 ## Out of scope
 
