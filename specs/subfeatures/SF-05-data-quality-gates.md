@@ -29,7 +29,7 @@ Each produces a flag; the resulting `data_quality` is `rejected` if any hard che
 | `schema_invalid` | hard | fails `pipeline/schema` validation |
 | `nonpositive_price` | hard | `amount_minor <= 0` |
 | `price_above_ceiling` | hard | > configurable absolute ceiling (default `USD 20000` economy) |
-| `price_below_floor` | soft | below a per-route floor (default: 35% of trailing-90-day median for that route + advance-purchase bucket). **Likely an error fare — flag, do not drop.** |
+| `price_below_floor` | soft | `amount_minor` < 0.35 × trailing-90-day median for that route + advance-purchase bucket (i.e. more than 65% below typical). **Likely an error fare — flag, do not drop.** |
 | `price_zscore_extreme` | soft | \|z\| > 4 vs. trailing distribution for route + AP bucket |
 | `stale_source_price` | soft | `observed_price_age_seconds` > 7 days |
 | `impossible_dates` | hard | `depart_date` in the past at `fetched_at`; `return_date < depart_date` |

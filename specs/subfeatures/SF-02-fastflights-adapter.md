@@ -52,6 +52,8 @@ tests/adapters/fastflights/**
 - A guarded live smoke test fetches one real route and produces valid records.
 - Library exceptions produce `source_error` and never propagate.
 - Daily cap and cooldown behavior are unit-tested with a fake clock.
+- Round-trip requests return `outcome = "empty"` (MVP is one-way — L0 §8).
+- Re-running the same fetch on the same UTC day produces identical `observation_id`s.
 - Adapter README documents the fragility, the caps, the cooldown, and how to bump the
   pinned library version.
 

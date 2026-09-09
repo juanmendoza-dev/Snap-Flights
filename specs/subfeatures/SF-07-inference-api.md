@@ -31,11 +31,13 @@ Request:
 ```json
 {
   "origin": "JFK", "destination": "LHR",
-  "depart_date": "2026-12-20", "return_date": "2027-01-03",
-  "trip_type": "round_trip", "cabin": "economy", "passengers": 1,
-  "current_price": { "amount_minor": 82900, "currency": "USD" }
+  "depart_date": "2026-12-20",
+  "trip_type": "one_way", "cabin": "economy", "passengers": 1,
+  "current_price": { "amount_minor": 42900, "currency": "USD" }
 }
 ```
+MVP is **one-way only** (L0 §8): `trip_type` must be `one_way`, `return_date` must be
+absent. A round-trip request gets `400` with a clear message.
 `current_price` optional — if omitted, the API uses the latest observed cheapest for the
 trip shape from the store.
 
@@ -43,11 +45,11 @@ Response:
 ```json
 {
   "trip_shape": { ...echoed... },
-  "current_price": { "amount_minor": 82900, "currency": "USD", "source": "user_supplied|store", "as_of": "2026-09-09T14:00:00Z" },
+  "current_price": { "amount_minor": 42900, "currency": "USD", "source": "user_supplied|store", "as_of": "2026-09-09T14:00:00Z" },
   "price_percentile": 34,
   "verdict": "wait",
-  "expected_low": { "amount_minor": 74000, "currency": "USD", "window_start": "2026-09-20", "window_end": "2026-10-04" },
-  "expected_curve": [ { "days_to_departure": 90, "amount_minor": 81000 }, ... ],
+  "expected_low": { "amount_minor": 38000, "currency": "USD", "window_start": "2026-09-20", "window_end": "2026-10-04" },
+  "expected_curve": [ { "days_to_departure": 90, "amount_minor": 41000 }, ... ],
   "confidence": "medium",
   "reason": "This fare is cheaper than 66% of the last year, but prices on this route usually dip about 10% around 10-11 weeks out.",
   "basis": { "observations": 412, "from": "2025-09-01", "to": "2026-09-08", "sources": ["travelpayouts", "fastflights"] },

@@ -25,6 +25,8 @@ Correctness and continuity matter more than volume.
 - Flight status / position / delay data — separate path, feeds E7, not this schema.
 - Real-time / sub-minute freshness. Daily cadence per route tier is the target.
 - Paid sources. Duffel and airline-direct adapters are designed-for, not built now.
+- Round trips, non-economy cabins, multi-passenger. MVP collects one-way / economy / 1 pax
+  only (L0 §8); the schema keeps the other fields for later.
 
 ---
 

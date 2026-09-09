@@ -13,6 +13,8 @@ Answer one question well: **"Should I book this now or wait?"** — with a reaso
 confidence level, plus a 90-day price outlook and a "this fare is cheaper than X% of the
 last year" percentile.
 
+**MVP scope:** one-way, economy, 1 passenger (L0 §8).
+
 ## Two phases
 
 ### Phase 1 — Baseline (specced now)

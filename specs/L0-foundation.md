@@ -41,10 +41,11 @@ Directory names are binding. The language/framework inside each is an open decis
 ```
 snap-flights/
 ├── specs/                      # this folder — source of truth for scope
+├── config/                     # committed runtime config (routes.yaml, quality.yaml, baseline.yaml, ...)
 ├── data/
 │   ├── fixtures/               # committed seed dataset (see §7) — schema-valid, deterministic
 │   │   ├── fare_observations.parquet
-│   │   ├── routes.csv
+│   │   ├── routes.csv         # test mirror of config/routes.yaml — same route keys
 │   │   └── README.md
 │   └── snapshots/              # gitignored — the real append-only store, built at runtime
 ├── pipeline/
@@ -69,7 +70,22 @@ snap-flights/
 
 **Rule:** a subfeature spec's *Files owned* section lists paths under exactly one of these
 trees (plus its own test files). If two subfeatures would need the same file, that file
-belongs in `shared/` and its shape is pinned in a spec before either starts.
+belongs in `shared/` (or `config/`) and its shape is pinned in a spec before either starts.
+
+### Route reference file (pinned here — owned by SF-04, read-only for everyone else)
+
+`config/routes.yaml` and its test mirror `data/fixtures/routes.csv` share these columns:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `route_key` | string(7) | `ORG-DST`, directional, primary key |
+| `origin` | string(3) | IATA |
+| `destination` | string(3) | IATA |
+| `region` | string | free-form grouping (`transatlantic`, `domestic-us`, …) |
+| `tier` | int | `1` hot, `2` warm, `3` cold — cadence defined in SF-04 |
+
+SF-03 creates `routes.csv` with this exact schema. SF-04 owns `config/routes.yaml` and may
+extend `routes.yaml` only; any new column needed in `routes.csv` is pinned here first.
 
 ---
 
@@ -212,12 +228,18 @@ A module in `pipeline/adapters/{source}/` exposing one entry point that takes a
 
 ```
 (source, origin, destination, depart_date, return_date, cabin, passengers,
- trip_type, stops_outbound, stops_return, carrier_primary, price_kind, fetched_at)
+ trip_type, stops_outbound, stops_return, carrier_primary, price_kind, fetched_date)
 ```
 
-`fetched_at` is part of the key on purpose: **the same trip shape fetched at two different
-times is two observations** — that's the time series. Two rows identical on everything
-*including* `fetched_at` are true duplicates (e.g. a retry) and the store keeps one.
+`fetched_date` (the UTC calendar date of `fetched_at`) is part of the key, not the full
+`fetched_at` timestamp. This makes collection **idempotent within a day**: re-running a
+fetch — a retry, a re-queued partial, a manual re-run — collapses to one row per trip shape
+per source per day. That's the intended sampling rate (daily per route tier). The full
+`fetched_at` is still stored as a non-key column for provenance.
+
+If a price genuinely moves within a day and we happen to catch both, the store keeps the
+**last** write for that key (later `fetched_at` wins) — we are not trying to capture
+intraday movement in the MVP.
 
 `observation_id` = `sha256(natural key fields joined with "|")[:16]`.
 
@@ -235,15 +257,19 @@ data/snapshots/fare_observations/
 
 - Partition by `fetched_date` (UTC date of `fetched_at`), not travel date — writes are
   always to today's partition, reads for training scan ranges.
-- One file per `(source, route, fetched_date, ingest_run)`. Never rewrite a file.
+- One file per `(source, route, fetched_date, ingest_run)`. Files are never rewritten. When
+  two runs on the same day produce the same `observation_id`, both rows land in different
+  files; `read()` resolves the collision by keeping the row with the latest `fetched_at`.
 - `data/snapshots/` is **gitignored**. The committed equivalent is `data/fixtures/` (§7).
 
 ### Store interface (behavioral)
 
-- `write(records[])` — append; dedup within the batch on `observation_id`; refuse to write
-  a record whose `fetched_date` partition already contains that `observation_id`.
-- `read(filters)` — by source, route(s), `fetched_at` range, `depart_date` range. Returns
-  canonical records. This is the only way models and the API get fare data.
+- `write(records[])` — append a new part file; dedup within the batch on `observation_id`
+  (last wins). Does not touch existing files. Safe to call repeatedly.
+- `read(filters)` — by source, route(s), `fetched_at`/`fetched_date` range, `depart_date`
+  range, `price_kind`, `data_quality`. Deduplicates across files on `observation_id`,
+  keeping the latest `fetched_at`. Excludes `data_quality = "rejected"` unless asked.
+  Returns canonical records. This is the only way models and the API get fare data.
 - The store does not interpret prices, does not pick "the" price for a trip — that's the
   model/API layer.
 
@@ -296,6 +322,23 @@ in code — they get decided with a pros/cons review first, then recorded here.
 Until D1–D4 are settled, subfeature specs describe **behavior and contracts**, and
 implementation waits. `SF-03` (schema + store) is the natural first thing to unblock once
 D1 and D4 land.
+
+### The option space is already partly narrowed — know this before the pros/cons review
+
+- **D1 leans Python whether we like it or not.** `fast-flights` (SF-02) is a Python
+  library. A non-Python pipeline would need a subprocess/service bridge just for that
+  adapter. "Python for the pipeline" is close to decided; the real D1 question is the
+  *frontend* and *API* language.
+- **D4 currently assumes Parquet.** §1, §6 and §7 all name Parquet files. If the storage
+  engine changes, those three sections change with it. Treat "Parquet + embedded engine"
+  as the default to confirm-or-replace, not a blank slate.
+
+### MVP is one-way only
+
+Travelpayouts' round-trip support is unverified, and it's our primary source. The MVP
+collects, models, and displays **one-way** trips (`trip_type = "one_way"`, `return_date =
+null`). `return_date` / `round_trip` stay in the schema for later. SF-07/SF-08 request and
+render one-way only. Revisit once a round-trip-capable source is confirmed.
 
 ---
 

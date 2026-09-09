@@ -17,11 +17,13 @@ write to the snapshot store, and re-queue partial/failed work. Owns route tiers 
 
 ```
 pipeline/scheduler/**
-data/fixtures/routes.csv        # SHARED with SF-03 — SF-03 creates it, SF-04 reads it;
-                                # if SF-04 needs to add columns, pin the change here first
-config/routes.yaml              # the production route set + tiers (fixtures routes.csv is the test mirror)
+config/routes.yaml              # production route set + tiers — OWNED here
 tests/scheduler/**
 ```
+
+**Read-only, do not modify:** `data/fixtures/routes.csv` (SF-03 owns it; column schema
+pinned in L0 §1). If the scheduler needs a new route attribute, add it to `config/routes.yaml`
+only; a matching column in `routes.csv` must be pinned in L0 §1 first.
 
 ## Concepts
 
@@ -40,6 +42,7 @@ Numbers are defaults; live in `config/routes.yaml`.
 1. Generate a new `ingest_run_id` (uuid).
 2. From the route config + last-fetched bookkeeping, build the list of
    `(route, depart_date_window, trip_type, cabin)` fetch requests due this run.
+   MVP: `trip_type` is always `one_way`, `cabin` always `economy` (L0 §8).
 3. Respect per-adapter budgets: Travelpayouts first (cheap, broad); fast-flights only for
    tier-1 routes and only within its daily cap (SF-02).
 4. For each request: call the adapter → take `records` → pass through SF-05 gates →

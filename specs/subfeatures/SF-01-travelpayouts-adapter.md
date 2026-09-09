@@ -42,9 +42,10 @@ tests/adapters/travelpayouts/**
   - `carrier_primary` null unless the response includes it.
   - `observed_price_age_seconds` from the response's cache metadata if present, else null.
   - `fetched_at = now (UTC)`, `ingest_run_id` from the request.
-- Round trips: if the endpoint supports a return date / trip duration, use it; otherwise
-  return `outcome = "empty"` for round-trip requests and note the limitation (MVP can run
-  one-way only from this source).
+- **One-way only** (L0 §8). If a request arrives with `trip_type = "round_trip"`, return
+  `outcome = "empty"` with an `error_detail` saying round trips aren't supported yet. Do
+  not attempt to synthesize a round-trip price. (A `return_date`-capable endpoint check is
+  a task for when the MVP's one-way constraint is revisited.)
 - Map failures to outcomes: HTTP 429 → `rate_limited` (+ `retry_after_seconds` from header
   if given); 5xx / network → `source_error`; 200 with no data → `empty`; got some months
   but hit a limit → `partial`.
@@ -59,7 +60,9 @@ tests/adapters/travelpayouts/**
 - A live smoke test (guarded by the token env var) fetches one real route-month and
   produces valid records.
 - 429 and 5xx responses produce the correct `outcome` and never raise.
-- Re-running the same fetch produces identical `observation_id`s.
+- Re-running the same fetch on the same UTC day produces identical `observation_id`s
+  (natural key uses `fetched_date`, not `fetched_at` — L0 §6).
+- Round-trip requests return `outcome = "empty"` (never raise, never guess).
 - Adapter README documents: how to get a token, the endpoints used, rate-limit defaults,
   and the one-way-only limitation.
 

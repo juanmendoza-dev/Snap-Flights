@@ -33,7 +33,8 @@ Stubs: **E3** search & discovery, **E4** cheap-fare hunting, **E5** alerts & aut
 **E6** booking handoff, **E7** trip quality, **E8** portfolio polish.
 
 The MVP spine is: **collect fares → store snapshots → baseline prediction → show buy-vs-wait**.
-Everything specced now serves that spine.
+Everything specced now serves that spine. The MVP is **one-way, economy, 1 passenger only**
+(see L0 §8) — round trips wait for a confirmed round-trip-capable data source.
 
 ## MVP subfeatures (one agent each)
 
@@ -48,14 +49,19 @@ Everything specced now serves that spine.
 | SF-07 | Inference API | E2 | SF-06 |
 | SF-08 | Buy-vs-wait UI surface | E2 | SF-07 |
 
-## Open decisions (not yet locked)
+## Open decisions (not yet locked) — resolve these before any agent starts
+
+**Every MVP subfeature is blocked on the stack decision (D1–D4).** Nothing is pickup-ready
+until that pros/cons conversation happens. Order of unblocking: decide stack → SF-03 →
+everything else.
 
 - **Tech stack** — language(s), API framework, frontend framework, storage engine,
   orchestrator, package manager. Deliberately deferred; to be decided with a pros/cons
-  review before implementation starts. L0 is written stack-neutral; the leading candidate
-  from the earlier draft (Python + gradient boosting) is recorded in
-  `reference/original-draft-spec.md` but is **not binding**.
-- See `L0-foundation.md` § Open decisions for the full list.
+  review. Note: the option space is **already partly narrowed** — `fast-flights` is a
+  Python library (SF-02), and Parquet is assumed throughout L0. See `L0-foundation.md` §8
+  for what's really still open.
+- The earlier draft's leaning (Python + gradient boosting) is in
+  `reference/original-draft-spec.md` — context, not binding.
 
 ## Reference
 

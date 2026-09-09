@@ -25,8 +25,9 @@ this spec owns the search-one-route + result flow only.)
 ## Screens
 
 ### 1. Search
-Origin, destination, depart date, optional return date, cabin. Minimal. On submit → call
-`/predict` (with no `current_price`; the API fills latest observed).
+Origin, destination, depart date. One-way only for the MVP (L0 §8) — no return-date field,
+cabin fixed to economy. Minimal. On submit → call `/predict` (with no `current_price`; the
+API fills latest observed).
 
 ### 2. Result
 
