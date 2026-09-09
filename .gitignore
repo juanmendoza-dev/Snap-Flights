@@ -1,0 +1,13 @@
+# runtime data store — the real snapshots are built, not committed
+data/snapshots/
+
+# deps / build / env
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+dist/
+build/
+.DS_Store
