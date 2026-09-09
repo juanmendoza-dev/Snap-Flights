@@ -241,3 +241,25 @@ def test_sources_with_recent_data(populated_store) -> None:
 
 def test_sources_with_recent_data_is_empty_without_data(tmp_path: Path) -> None:
     assert store_at(tmp_path).sources_with_recent_data(as_of=date(2026, 9, 9)) == {}
+
+
+def test_default_store_is_rooted_at_the_repo(repo_root: Path) -> None:
+    """SF-03-build §9 freezes default_store() as SF-07's entry point."""
+    from pipeline.store import SnapshotStore, default_store
+
+    store = default_store()
+
+    assert isinstance(store, SnapshotStore)
+    assert store.settings.repo_root == repo_root
+    assert store.snapshots_root == repo_root / "data" / "snapshots" / "fare_observations"
+    assert store.settings.fixture_parquet.exists()
+
+
+def test_default_store_follows_the_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline.store import default_store
+
+    monkeypatch.setenv("SNAP_USE_FIXTURES", "1")
+    assert default_store().settings.use_fixtures is True
+
+    monkeypatch.delenv("SNAP_USE_FIXTURES", raising=False)
+    assert default_store().settings.use_fixtures is False

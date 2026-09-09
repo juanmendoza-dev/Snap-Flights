@@ -67,7 +67,14 @@ def next_free_part_path(
 
 def scan_glob(root: Path) -> str:
     """{root}/source=*/route_key=*/fetched_date=*/part-*.parquet — the DuckDB read_parquet
-    argument, with hive_partitioning=1."""
+    argument, with hive_partitioning=0.
+
+    Inference is off because `source` and `route_key` are real columns in the file as well as
+    path segments (SF-03-build §2.5): re-deriving them from the path yields dictionary-typed
+    columns that collide with the file's own string columns. `fetched_date` is a path segment
+    only, and a query that filters on it computes CAST(fetched_at AS DATE) under a UTC
+    session timezone instead.
+    """
     return str(Path(root) / "source=*" / "route_key=*" / "fetched_date=*" / "part-*.parquet")
 
 
