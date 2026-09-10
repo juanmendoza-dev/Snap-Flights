@@ -1,0 +1,33 @@
+# Parallel-agent contracts and integration
+
+### R1 — The advertised frozen seam already requires out-of-lane edits
+- **Severity:** high
+- **Where:** `specs/README.md` Two-lane split; L0 §1; SF-05 Files owned/Known store interaction; SF-03-build §2.1 and frozen interfaces.
+- **What's wrong:** `pipeline/schema/` and `pipeline/store/` are frozen after SF-03, yet SF-05 is told to edit `_build_query` and may extend `QualityFlag` in the schema. Neither path is in SF-05's owned files. `config/quality.yaml` is required but also absent from its ownership block. SF-05 needs AP-bucket semantics that SF-06 assigns to `models/features/buckets.py` and config that Lane A does not own.
+- **Why it matters:** Two agents can comply with their local feature requirements only by violating ownership or inventing different shared semantics. A schema/gate patch can invalidate Lane B's frozen frame assumptions after it starts.
+- **Recommended fix:** Land a foundation-repair PR before reopening the lanes: address S1–S3/T1–T3, assign shared AP-bucket definitions and quality configuration ownership, and publish one versioned contract list. Treat “frozen” as stable public API under an explicit change procedure, not immutable files. Contract changes need a named owner, dependent-consumer list, migration/tests, and an integration point before dependent branches resume. Put the SF-05 store fix in that foundation PR rather than granting an undocumented exception later.
+- **Confidence:** high — the ownership conflict is explicit in the specs.
+
+### R2 — Adapters can compile independently yet be impossible to orchestrate
+- **Severity:** high
+- **Where:** L0 §5; SF-01/SF-02 entry points; SF-04 partial-gap requeue; SF-05 interfaces.
+- **What's wrong:** The stack is chosen but `FetchRequest`, `FetchResult`, the adapter callable/protocol, async-vs-sync behavior and clock injection are still not concrete shared types. A partial result gives records and an outcome, but no attempted/completed/failed date coverage. Absence of a row cannot distinguish “queried successfully, no fare” from “not queried.” SF-05 likewise lacks a pinned gate result containing accepted, suspect, rejected/quarantined counts and run-level alarms. SF-02 needs cooldown/daily-cap state while L0 calls adapters stateless except for a rate limiter.
+- **Why it matters:** Travelpayouts might return September successfully with no fares and fail October. The scheduler cannot infer the October-only retry gap from `records=[]`. Agents can choose incompatible function names, concurrency, state ownership and error models even without touching the same file.
+- **Recommended fix:** Add a foundation-owned typed protocol module before adapter work. Pin request/result models, sync/async convention, clock and transport injection, and per-date or interval coverage with statuses including completed-empty and unattempted. Include attempted HTTP-call counts and structured retry hints. Define a quality result and run accumulator with distinct invalid-input counts. Keep request pacing in adapters, but pass a shared persistent budget/circuit service or move cross-run cap/cooldown enforcement to the scheduler explicitly. Test two mock adapters against the same scheduler contract, including noncontiguous gaps.
+- **Confidence:** high — the current result cannot encode required recovery information.
+
+### R3 — Root dependencies and shared modules are an unassigned third lane
+- **Severity:** medium
+- **Where:** P0 Files owned; `pyproject.toml`, `uv.lock`, `tests/conftest.py`, CI; SF-01/SF-02 Files owned; SF-07-build `shared/routes.py`.
+- **What's wrong:** Source agents need to add/pin runtime libraries but neither owns project dependencies or the lockfile. `httpx` currently exists only in the development group despite SF-01 naming it for runtime. Future shared route loading is assigned to SF-07, while SF-04 may need it earlier. Moving a contested file into `shared/` does not by itself establish who edits it or when.
+- **Why it matters:** Adapters pass under `uv sync --dev` and fail under a production `--no-dev` install, or both agents regenerate the same lockfile. Scheduler/API invent separate route-loader types. The two nominally disjoint lanes meet at root configuration anyway.
+- **Recommended fix:** Name an integration owner for `pyproject.toml`, `uv.lock`, root fixtures, CI and shared contracts. Prepare a dependency PR before adapter branches start: runtime `httpx` when SF-01 lands, selected fast-flights version when SF-02 lands. Resolve competing dependency edits serially and regenerate the lock after combining declarations. Pin/create the route loader before either consumer, with its YAML shape and mode-dependent fallback behavior. Maintain ownership for shared files, not just subtree membership.
+- **Confidence:** high — ownership/dependency placement is inspectable; no production adapter import failure is claimed yet.
+
+### R4 — Two integration modes exist without a current-mode handoff
+- **Severity:** medium
+- **Where:** `specs/README.md` parallel branches and `--no-ff` PRs; `specs/implementation/README.md` current solo/main pass and push-per-commit instructions; `.github/workflows/ci.yml`; git history.
+- **What's wrong:** The L3 README explicitly describes a different solo pass, so this is not evidence that the existing commits violated an authorized workflow. The problem is that the main entry point still directs new agents into lanes while L3 tells them to work directly on main. There is no single current-mode switch, active branch registry or documented transition back to parallel work. CI waits only at feature boundaries in the solo plan. No tracked CODEOWNERS/ownership checker is present; remote branch protection was not supplied.
+- **Why it matters:** A Lane B agent following L3 pushes directly to main while Lane A follows the PR discipline. A stale branch can pass its own checks and merge against changed contracts, despite a clean ownership split.
+- **Recommended fix:** Put the current execution mode, implemented milestones and next available work in `specs/README.md`. For parallel mode require isolated worktrees/branches, one owner per task, PR integration and checks against the current target branch/merge result. Publish a small ownership matrix including shared/root files. Configure required checks and main protection when the remote settings are available; do not infer them from local history. Remove direct-main instructions from specs used during parallel work, or clearly scope them to the completed solo pass.
+- **Confidence:** high on documentation ambiguity; remote protection and actual multi-agent practice remain unverified.
