@@ -9,10 +9,12 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pytest
+from pydantic import ValidationError
 
 from pipeline.schema import PriceKind, Source
 from pipeline.schema.arrow import FARE_OBSERVATION_ARROW_SCHEMA
-from pipeline.store.paths import part_files, part_path
+from pipeline.store.paths import part_files, part_path, under_root
 
 from . import RUN_A, RUN_B, make_observation, store_at
 
@@ -145,3 +147,67 @@ def test_rewrite_same_batch_is_idempotent_on_read(tmp_path: Path) -> None:
     assert sorted(record.observation_id for record in read_back) == sorted(
         record.observation_id for record in records
     )
+
+
+# C2 — a partition value is one path segment, and the target stays under the store root.
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "x/../../../../../escaped",
+        "../escaped",
+        "..",
+        ".",
+        "",
+        "a/b",
+        "a\\b",
+        "a\x00b",
+    ],
+)
+def test_part_path_rejects_a_run_id_that_is_not_one_safe_segment(
+    tmp_path: Path, run_id: str
+) -> None:
+    """`x/../../../../../escaped` used to write data/snapshots/escaped.parquet, outside the
+    fare store's scan tree entirely."""
+    with pytest.raises(ValueError, match="unsafe_path_component"):
+        part_path(
+            tmp_path,
+            source="travelpayouts",
+            route_key="JFK-LHR",
+            fetched_date=date(2026, 9, 9),
+            ingest_run_id=run_id,
+        )
+
+
+@pytest.mark.parametrize("component", ["source", "route_key"])
+def test_part_path_rejects_a_traversing_partition_value(tmp_path: Path, component: str) -> None:
+    kwargs: dict[str, object] = {
+        "source": "travelpayouts",
+        "route_key": "JFK-LHR",
+        "fetched_date": date(2026, 9, 9),
+        "ingest_run_id": RUN_A,
+    }
+    kwargs[component] = "../../escaped"
+
+    with pytest.raises(ValueError, match="unsafe_path_component"):
+        part_path(tmp_path, **kwargs)  # type: ignore[arg-type]
+
+
+def test_under_root_rejects_a_target_outside_the_store(tmp_path: Path) -> None:
+    root = tmp_path / "fare_observations"
+
+    assert under_root(root, root / "source=travelpayouts") == root / "source=travelpayouts"
+    with pytest.raises(ValueError, match="escaped_store_root"):
+        under_root(root, tmp_path / "escaped.parquet")
+
+
+def test_writing_a_traversing_run_id_is_impossible_end_to_end(tmp_path: Path) -> None:
+    """The model refuses the run id before the store ever sees it, and nothing lands
+    anywhere near the store root."""
+    store_at(tmp_path)
+
+    with pytest.raises(ValidationError):
+        make_observation(ingest_run_id="x/../../../../../escaped")
+
+    assert list(tmp_path.rglob("*.parquet")) == []

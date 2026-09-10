@@ -558,7 +558,17 @@ def part_path(root: Path, *, source: str, route_key: str, fetched_date: date,
 def scan_glob(root: Path) -> str:
     """{root}/source=*/route_key=*/fetched_date=*/part-*.parquet — the DuckDB read_parquet
     argument, with hive_partitioning=0 (the partition columns are in the file; see §2.5)."""
+
+def under_root(root: Path, target: Path) -> Path:
+    """`target`, asserted to resolve inside `root` (both sides resolved first, since the
+    store root may be a symlink). ValueError otherwise."""
 ```
+
+**Path components are checked here too (review C2).** Every partition value must be a single
+safe segment — `^[A-Za-z0-9][A-Za-z0-9._-]*$`, never `.` or `..` — and every constructed path
+is asserted to stay under the store root. The model already bounds what can reach these
+functions, but the store owns its own filesystem boundary: a run id of
+`x/../../../../../escaped` wrote `data/snapshots/escaped.parquet`, outside the scan tree.
 
 ## 3. Config file schemas
 

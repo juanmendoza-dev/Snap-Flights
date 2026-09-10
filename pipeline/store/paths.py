@@ -8,21 +8,52 @@ data/snapshots/fare_observations/
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 
 PART_PREFIX: str = "part-"
 PART_SUFFIX: str = ".parquet"
 
+# A partition value is one path segment and nothing else. The model already bounds what can
+# reach here (IATA codes, an enum, a UUID), but the store owns its own filesystem boundary:
+# a value that travels between processes or arrives from a hand-built call must not be able
+# to name a directory of its own.
+_SAFE_COMPONENT: re.Pattern[str] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _checked_component(name: str, value: str) -> str:
+    """One path segment, or ValueError. Rejects separators, dot segments and NUL."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"unsafe_path_component: {name} must be a non-empty string, got {value!r}")
+    if value in {".", ".."} or not _SAFE_COMPONENT.match(value):
+        raise ValueError(
+            f"unsafe_path_component: {name} {value!r} is not a single safe path segment"
+        )
+    return value
+
+
+def under_root(root: Path, target: Path) -> Path:
+    """`target`, asserted to resolve inside `root`. Both sides are resolved first: the store
+    root itself may be a symlink (a temp dir on macOS routinely is)."""
+    resolved_root = Path(root).resolve()
+    resolved_target = Path(target).resolve()
+    if not resolved_target.is_relative_to(resolved_root):
+        raise ValueError(
+            f"escaped_store_root: {resolved_target} is not under the store root {resolved_root}"
+        )
+    return target
+
 
 def partition_dir(root: Path, *, source: str, route_key: str, fetched_date: date) -> Path:
     """{root}/source={source}/route_key={route_key}/fetched_date={YYYY-MM-DD}"""
-    return (
+    directory = (
         Path(root)
-        / f"source={source}"
-        / f"route_key={route_key}"
-        / f"fetched_date={fetched_date.isoformat()}"
+        / f"source={_checked_component('source', source)}"
+        / f"route_key={_checked_component('route_key', route_key)}"
+        / f"fetched_date={_checked_component('fetched_date', fetched_date.isoformat())}"
     )
+    return under_root(root, directory)
 
 
 def part_path(
@@ -38,11 +69,11 @@ def part_path(
     .parquet after."""
     if attempt < 1:
         raise ValueError(f"attempt must be >= 1, got {attempt}")
-    stem = PART_PREFIX + ingest_run_id
+    stem = PART_PREFIX + _checked_component("ingest_run_id", ingest_run_id)
     if attempt > 1:
         stem = f"{stem}-{attempt:03d}"
     directory = partition_dir(root, source=source, route_key=route_key, fetched_date=fetched_date)
-    return directory / f"{stem}{PART_SUFFIX}"
+    return under_root(root, directory / f"{stem}{PART_SUFFIX}")
 
 
 def next_free_part_path(
