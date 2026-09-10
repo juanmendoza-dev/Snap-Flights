@@ -2,8 +2,10 @@
 
 Asserts the Parquet file's physical schema equals the pinned Arrow schema field-for-field,
 runs the batch validator over every row, checks `routes.csv`'s columns against L0 §1, and
-prints the report. Exits 1 on any violation; exits 0 with a skip notice when the fixture
-file does not exist yet.
+prints the report. Exits 1 on any violation, and exits 1 when the file it was asked to
+validate does not exist — a check that validates nothing is not a check that passed
+(review C6). `--allow-missing` restores the P0 skip, for a tree where the fixtures have not
+been generated yet; CI and operational checks do not pass it.
 
     uv run python scripts/validate_fixtures.py
 """
@@ -92,8 +94,8 @@ def validate_rows(path: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Validate every row of data/fixtures/fare_observations.parquet against the
-    canonical schema. Returns 0 on success, 1 on any violation, 0 with a printed
-    skip notice when the fixture file does not exist yet (P0 state)."""
+    canonical schema. Returns 0 on success and 1 on any violation, including a missing
+    input file unless --allow-missing was passed."""
     parser = argparse.ArgumentParser(description="Validate the committed fixture dataset.")
     parser.add_argument(
         "path",
@@ -101,6 +103,15 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=FIXTURE_PATH,
         help="Parquet file to validate (default: data/fixtures/fare_observations.parquet)",
+    )
+    parser.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help=(
+            "Exit 0 with a skip notice when the file does not exist (the P0 scaffold "
+            "behaviour, for a tree where the fixtures have not been generated). CI and "
+            "operational checks must not pass this."
+        ),
     )
     args = parser.parse_args(argv)
     path: Path = args.path
@@ -110,8 +121,14 @@ def main(argv: list[str] | None = None) -> int:
             shown = path.relative_to(REPO_ROOT)
         except ValueError:
             shown = path
-        print(f"skip: {shown} does not exist yet — nothing to validate")
-        return 0
+        if args.allow_missing:
+            print(f"skip: {shown} does not exist — nothing to validate (--allow-missing)")
+            return 0
+        # A typo'd path or a fixture missing from a deployment used to be reported as a
+        # successful skip, so running this as a standalone check could validate nothing
+        # and still say it passed (review C6).
+        print(f"error: {shown} does not exist — nothing was validated")
+        return 1
 
     exit_code = 0
 

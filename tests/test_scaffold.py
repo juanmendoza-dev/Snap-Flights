@@ -69,12 +69,16 @@ def test_third_party_imports() -> None:
     assert importlib.util.find_spec("pandas") is None
 
 
-def test_validate_fixtures_skips_when_absent(repo_root: Path) -> None:
+def test_validate_fixtures_fails_when_the_input_is_absent(tmp_path: Path) -> None:
+    """P0 exited 0 with a skip notice here, when no fixture had been generated yet. SF-03
+    generated it, so a missing input is now a failure (review C6) and the old behaviour
+    needs --allow-missing, which CI does not pass."""
     from scripts import validate_fixtures
 
-    if (repo_root / "data" / "fixtures" / "fare_observations.parquet").exists():
-        pytest.skip("fixture dataset exists — SF-03 owns the validating path")
-    assert validate_fixtures.main([]) == 0
+    absent = str(tmp_path / "absent.parquet")
+
+    assert validate_fixtures.main([absent]) == 1
+    assert validate_fixtures.main(["--allow-missing", absent]) == 0
 
 
 def test_pyarrow_pinned_to_one_minor(repo_root: Path) -> None:

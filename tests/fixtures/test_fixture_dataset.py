@@ -298,5 +298,28 @@ def test_validate_fixtures_script_exits_one_on_a_corrupted_copy(
     assert validate_fixtures.main([str(path)]) == 1
 
 
-def test_validate_fixtures_script_skips_a_missing_file(tmp_path: Path) -> None:
-    assert validate_fixtures.main([str(tmp_path / "absent.parquet")]) == 0
+def test_validate_fixtures_script_fails_on_a_missing_file(tmp_path: Path) -> None:
+    """A typo'd path used to be reported as a successful skip, so the operational check
+    could validate nothing and still pass (review C6)."""
+    assert validate_fixtures.main([str(tmp_path / "absent.parquet")]) == 1
+
+
+def test_validate_fixtures_script_fails_on_a_typo_in_the_fixture_path(repo_root: Path) -> None:
+    typo = repo_root / "data" / "fixtures" / "fare_observation.parquet"
+
+    assert not typo.exists()
+    assert validate_fixtures.main([str(typo)]) == 1
+
+
+def test_validate_fixtures_script_skips_a_missing_file_only_when_asked(tmp_path: Path) -> None:
+    """The P0 scaffold behaviour survives behind an explicit flag, which CI does not pass."""
+    absent = str(tmp_path / "absent.parquet")
+
+    assert validate_fixtures.main(["--allow-missing", absent]) == 0
+
+
+def test_ci_does_not_pass_allow_missing(repo_root: Path) -> None:
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "validate_fixtures.py" in workflow
+    assert "--allow-missing" not in workflow

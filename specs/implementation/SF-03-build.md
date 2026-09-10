@@ -949,7 +949,12 @@ Reads `data/fixtures/fare_observations.parquet` with pyarrow, asserts the file s
 `FARE_OBSERVATION_ARROW_SCHEMA` field-for-field (name, type, nullability), runs
 `validate_batch()` over every row, prints the `BatchReport`, and returns `1` if
 `report.invalid > 0` or the schema differs. Also validates `routes.csv` columns against L0 §1.
-Keeps P0's behaviour of exiting 0 with a skip notice when the file is absent.
+
+**A missing input file is a failure (review C6).** P0 exited 0 with a skip notice, because
+no fixture had been generated yet; SF-03 generates it, and a check that validated nothing is
+not a check that passed — a typo'd path or a fixture missing from a deployment used to be
+reported as success. `--allow-missing` restores the skip for a tree without generated
+fixtures; CI and operational checks do not pass it.
 
 ## 6. Frozen frame schema — `read_frame()`
 
@@ -1008,6 +1013,10 @@ Additional tests not tied to a Done-when bullet but required by this build spec:
 | `tests/fixtures/test_fixture_dataset.py::test_no_nullable_column_is_entirely_null_except_the_documented_three` | `return_date`, `stops_return`, `quality_flags` are the only all-null columns |
 | `tests/fixtures/test_fixture_dataset.py::test_file_under_10mb` | L0 §7's size budget |
 | `tests/fixtures/test_fixture_dataset.py::test_quality_flags_is_null_not_empty_list` | keeps equality tests stable |
+| `tests/fixtures/test_fixture_dataset.py::test_validate_fixtures_script_fails_on_a_missing_file` | a missing input exits 1 (review C6) |
+| `tests/fixtures/test_fixture_dataset.py::test_validate_fixtures_script_fails_on_a_typo_in_the_fixture_path` | `fare_observation.parquet` (no `s`) exits 1 |
+| `tests/fixtures/test_fixture_dataset.py::test_validate_fixtures_script_skips_a_missing_file_only_when_asked` | `--allow-missing` exits 0 |
+| `tests/fixtures/test_fixture_dataset.py::test_ci_does_not_pass_allow_missing` | the workflow runs the validator without the escape hatch |
 
 ## 8. Observation counts per (route, AP bucket)
 

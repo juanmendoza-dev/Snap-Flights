@@ -183,7 +183,11 @@ this pass, so nothing legitimately needs one.
 def main(argv: list[str] | None = None) -> int:
     """Validate every row of data/fixtures/fare_observations.parquet against the
     canonical schema. Returns 0 on success, 1 on any violation, 0 with a printed
-    skip notice when the fixture file does not exist yet (P0 state)."""
+    skip notice when the fixture file does not exist yet (P0 state).
+
+    SUPERSEDED BY SF-03 (review C6): once the fixture is generated, a missing input file
+    exits 1. The skip lives behind an explicit --allow-missing flag that CI does not
+    pass."""
 ```
 
 ```python
@@ -257,7 +261,7 @@ SF-07's, `config/quality.yaml` is SF-05's and is **not** created in this pass.
 | `test_snapshots_dir_is_gitignored` | `data/snapshots/` appears in `.gitignore` and is not tracked by git |
 | `test_core_imports` | `import pipeline, models, api, shared` all succeed |
 | `test_third_party_imports` | `duckdb`, `polars`, `pyarrow`, `pydantic`, `fastapi`, `yaml` import; `pandas` does **not** (asserts the polars decision is not quietly violated) |
-| `test_validate_fixtures_skips_when_absent` | `scripts.validate_fixtures.main([])` returns `0` when the fixture file is missing |
+| `test_validate_fixtures_skips_when_absent` | `scripts.validate_fixtures.main([])` returns `0` when the fixture file is missing. **Superseded by SF-03** (review C6): now `test_validate_fixtures_fails_when_the_input_is_absent` — a missing input returns `1`, and `--allow-missing` returns `0` |
 | `test_pyarrow_pinned_to_one_minor` | `pyproject.toml` constrains `pyarrow` to a single minor version (guards fixture byte-identity) |
 | `test_clock_override` | with `SNAP_TODAY=2026-09-09`, `shared.clock.today_utc() == date(2026, 9, 9)` and `now_utc() == datetime(2026, 9, 9, tzinfo=UTC)`; with `SNAP_TODAY` unset (`monkeypatch.delenv`), `today_utc()` equals `datetime.now(UTC).date()`; with `SNAP_TODAY="not-a-date"`, both raise `ValueError` |
 | `test_a_datetime_shaped_clock_pin_fails_in_both_functions` | `SNAP_TODAY=2026-09-09T12:34:56` (and other non-`YYYY-MM-DD` spellings) raises from **both** functions (review C4) |
@@ -271,7 +275,9 @@ stands in.
 - `uv sync --locked --dev` succeeds from a clean checkout on Python 3.12.
 - `uv run ruff check . && uv run ruff format --check .` is clean.
 - `uv run pytest` passes with the eight tests above.
-- `uv run python scripts/validate_fixtures.py` exits 0 and prints a skip notice.
+- `uv run python scripts/validate_fixtures.py` exits 0 and prints a skip notice. (Superseded
+  by SF-03: with the fixture generated it validates it; with the fixture missing it exits 1
+  unless `--allow-missing` is passed — review C6.)
 - The CI workflow is green on `main`.
 - Every directory in L0 §1 exists in the tree (`data/snapshots/` excepted).
 - `shared/clock.py` exists, and
