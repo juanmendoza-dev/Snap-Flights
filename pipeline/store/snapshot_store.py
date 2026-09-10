@@ -254,11 +254,14 @@ class SnapshotStore:
     def read_frame(self, filters: ReadFilters | None = None) -> pl.DataFrame:
         """Bulk path. Same rows, same filtering, same dedup as read(), returned as a
         polars DataFrame with the frozen schema in SF-03-build §6."""
+        resolved = filters if filters is not None else ReadFilters()
+        # An empty selection is answered here, not by DuckDB: `IN ()` is a parser error, and
+        # the answer must not depend on whether the store happens to hold data yet (C3).
         targets = self._scan_targets()
-        if not targets:
+        if not targets or resolved.selects_nothing:
             return _empty_frame()
 
-        query, params = self._build_query(filters if filters is not None else ReadFilters())
+        query, params = self._build_query(resolved)
         connection = self._connect()
         try:
             frame = connection.execute(query, [targets, *params]).pl()

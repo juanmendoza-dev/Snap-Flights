@@ -495,14 +495,19 @@ def use_fixtures() -> bool:
 from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict
 
+RouteKeyFilter = Annotated[str, Field(pattern=r"^[A-Z]{3}-[A-Z]{3}$")]
+Limit = Annotated[int, Field(strict=True, ge=0)]
+
+
 class ReadFilters(BaseModel):
     """Every filter is AND-ed. None means 'no constraint on this dimension'.
-    Date/timestamp ranges are inclusive on both ends."""
+    Date/timestamp ranges are inclusive on both ends. An empty list means 'nothing
+    matches' and returns an empty result."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     source: Source | Sequence[Source] | None = None
-    route_key: str | Sequence[str] | None = None
+    route_key: RouteKeyFilter | Sequence[RouteKeyFilter] | None = None
     fetched_date_from: date | None = None
     fetched_date_to: date | None = None
     fetched_at_from: datetime | None = None     # tz-aware UTC; narrows within a fetched_date
@@ -512,8 +517,31 @@ class ReadFilters(BaseModel):
     price_kind: PriceKind | Sequence[PriceKind] | None = None
     data_quality: DataQuality | Sequence[DataQuality] | None = None
     include_rejected: bool = False              # L0 §6: rejected excluded unless asked
-    limit: int | None = None
+    limit: Limit | None = None
+
+    @field_validator("fetched_at_from", "fetched_at_to")
+    @classmethod
+    def _cutoff_is_utc_aware(cls, v: datetime | None) -> datetime | None:
+        """tz-aware UTC, the same contract as the record's own fetched_at (L0 §0)."""
+
+    @model_validator(mode="after")
+    def _ranges_are_ordered(self) -> ReadFilters: ...
+
+    @property
+    def selects_nothing(self) -> bool:
+        """True when some dimension was given an explicitly empty list."""
 ```
+
+**What the filters check, pinned (review C3).** Everything a caller can express is validated
+at construction rather than by DuckDB halfway through a query:
+
+| Input | Behaviour |
+|---|---|
+| `route_key=[]` (or any empty list) | an empty result with the frozen §6 schema, short-circuited before SQL — `IN ()` is a parser error, and the answer must not depend on whether the store holds data yet |
+| `limit=-1`, `limit=True`, `limit="10"` | `ValidationError`; `limit=0` is a legitimate empty result |
+| naive or non-UTC `fetched_at_*` | `ValidationError`. The query runs under a UTC session, so a naive local cutoff was silently reinterpreted |
+| `*_from` after `*_to` | `ValidationError` (`reversed_range`); `from == to` is a valid one-instant window |
+| a route key that is not `ORG-DST` | `ValidationError`. A well-formed route with no rows is simply empty |
 
 Precedence rule, pinned: when `data_quality` is set explicitly it wins outright and
 `include_rejected` is ignored. When `data_quality` is `None`, rows with

@@ -1,10 +1,11 @@
 """Every filter, cross-file dedup, and the frozen frame contract (L0 §6, SF-03-build §6)."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
 import pytest
+from pydantic import ValidationError
 
 from pipeline.schema import DataQuality, PriceKind, Source
 from pipeline.schema.arrow import COLUMN_ORDER
@@ -263,3 +264,100 @@ def test_default_store_follows_the_fixture_environment(monkeypatch: pytest.Monke
 
     monkeypatch.delenv("SNAP_USE_FIXTURES", raising=False)
     assert default_store().settings.use_fixtures is False
+
+
+# C3 — everything a filter can express is checked at construction, not by DuckDB.
+
+
+@pytest.mark.parametrize("dimension", ["source", "route_key", "price_kind", "data_quality"])
+def test_an_empty_list_filter_selects_nothing_on_a_populated_store(
+    populated_store, dimension: str
+) -> None:
+    """`IN ()` is a DuckDB ParserException. An empty selection is a legitimate request —
+    the scheduler asking about zero routes — and answers with an empty result."""
+    filters = ReadFilters(**{dimension: []})
+
+    frame = populated_store.read_frame(filters)
+
+    assert populated_store.read(filters) == []
+    assert frame.height == 0
+    assert dict(frame.schema) == FROZEN_FRAME_SCHEMA
+
+
+@pytest.mark.parametrize("dimension", ["source", "route_key", "price_kind", "data_quality"])
+def test_an_empty_list_filter_selects_nothing_on_an_empty_store(
+    tmp_path: Path, dimension: str
+) -> None:
+    """Same answer either way: the failure mode used to depend on whether the store
+    happened to hold data yet."""
+    store = store_at(tmp_path)
+    filters = ReadFilters(**{dimension: []})
+
+    assert store.read(filters) == []
+    assert dict(store.read_frame(filters).schema) == FROZEN_FRAME_SCHEMA
+
+
+def test_limit_zero_returns_nothing(populated_store) -> None:
+    assert populated_store.read(ReadFilters(limit=0)) == []
+
+
+def test_rejects_a_negative_limit() -> None:
+    """DuckDB raised a BinderException from inside the query builder."""
+    with pytest.raises(ValidationError):
+        ReadFilters(limit=-1)
+
+
+@pytest.mark.parametrize("value", [True, 1.0, "10"])
+def test_rejects_a_limit_that_is_not_a_plain_int(value: object) -> None:
+    with pytest.raises(ValidationError):
+        ReadFilters(limit=value)
+
+
+@pytest.mark.parametrize("bound", ["fetched_at_from", "fetched_at_to"])
+def test_rejects_a_naive_fetched_at_filter(bound: str) -> None:
+    """The query runs under a UTC session, so a naive local cutoff was silently
+    reinterpreted — the same contract the record itself refuses to guess at."""
+    with pytest.raises(ValidationError, match="naive_timestamp"):
+        ReadFilters(**{bound: datetime(2026, 9, 9, 6, 0)})
+
+
+@pytest.mark.parametrize("bound", ["fetched_at_from", "fetched_at_to"])
+def test_rejects_a_non_utc_fetched_at_filter(bound: str) -> None:
+    offset = timezone(timedelta(hours=-5))
+    with pytest.raises(ValidationError, match="non_utc_timestamp"):
+        ReadFilters(**{bound: datetime(2026, 9, 9, 6, 0, tzinfo=offset)})
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"fetched_date_from": date(2026, 9, 9), "fetched_date_to": date(2026, 9, 8)},
+        {
+            "fetched_at_from": datetime(2026, 9, 9, 6, tzinfo=UTC),
+            "fetched_at_to": datetime(2026, 9, 9, 5, tzinfo=UTC),
+        },
+        {"depart_date_from": date(2027, 1, 5), "depart_date_to": date(2026, 12, 20)},
+    ],
+)
+def test_rejects_a_reversed_range(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="reversed_range"):
+        ReadFilters(**kwargs)
+
+
+def test_accepts_a_single_instant_range() -> None:
+    """Both ends inclusive, so from == to is a valid one-instant window."""
+    moment = datetime(2026, 9, 9, 6, tzinfo=UTC)
+    assert ReadFilters(fetched_at_from=moment, fetched_at_to=moment).fetched_at_to == moment
+
+
+@pytest.mark.parametrize("route", ["jfk-lhr", "JFK", "JFKLHR", "JFK-LHR-CDG", "'; DROP TABLE"])
+def test_rejects_a_malformed_route_key(route: str) -> None:
+    with pytest.raises(ValidationError):
+        ReadFilters(route_key=route)
+
+    with pytest.raises(ValidationError):
+        ReadFilters(route_key=[route])
+
+
+def test_an_unknown_but_well_formed_route_key_is_simply_empty(populated_store) -> None:
+    assert populated_store.read(ReadFilters(route_key="ZZZ-YYY")) == []
