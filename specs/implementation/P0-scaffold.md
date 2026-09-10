@@ -192,6 +192,10 @@ import datetime as _dt
 
 SNAP_TODAY_ENV: str = "SNAP_TODAY"
 
+def _pinned_date() -> _dt.date | None:
+    """SNAP_TODAY as a date, or None when unset/empty. The ONE parser both public
+    functions use; ValueError when it is set but is not ISO YYYY-MM-DD."""
+
 def today_utc() -> _dt.date:
     """The project's definition of "today". Returns SNAP_TODAY parsed as an ISO
     YYYY-MM-DD date when that variable is set and non-empty, otherwise the real UTC
@@ -201,8 +205,15 @@ def today_utc() -> _dt.date:
 def now_utc() -> _dt.datetime:
     """Timezone-aware UTC now. When SNAP_TODAY is set, returns that date at
     00:00:00+00:00, so a pinned run has a single fixed instant. Same parse rules,
-    same ValueError."""
+    same ValueError — midnight is derived from the date today_utc() returns, never
+    parsed separately."""
 ```
+
+**One parser, pinned (review C4).** `today_utc()` parsed a date and `now_utc()` parsed a
+datetime and replaced its tzinfo, so `SNAP_TODAY=2026-09-09T12:34:56` made the first raise
+and the second return `12:34:56+00:00`. The shape check (`^\d{4}-\d{2}-\d{2}$`) is explicit
+rather than left to `date.fromisoformat`, so the rule belongs to this module and not to
+whichever ISO spellings a given Python version happens to accept.
 
 `today_utc()` is not cached: a long-running process must see a real date rollover. Both
 functions read the environment on every call, which is what lets a test `monkeypatch.setenv`
@@ -249,6 +260,8 @@ SF-07's, `config/quality.yaml` is SF-05's and is **not** created in this pass.
 | `test_validate_fixtures_skips_when_absent` | `scripts.validate_fixtures.main([])` returns `0` when the fixture file is missing |
 | `test_pyarrow_pinned_to_one_minor` | `pyproject.toml` constrains `pyarrow` to a single minor version (guards fixture byte-identity) |
 | `test_clock_override` | with `SNAP_TODAY=2026-09-09`, `shared.clock.today_utc() == date(2026, 9, 9)` and `now_utc() == datetime(2026, 9, 9, tzinfo=UTC)`; with `SNAP_TODAY` unset (`monkeypatch.delenv`), `today_utc()` equals `datetime.now(UTC).date()`; with `SNAP_TODAY="not-a-date"`, both raise `ValueError` |
+| `test_a_datetime_shaped_clock_pin_fails_in_both_functions` | `SNAP_TODAY=2026-09-09T12:34:56` (and other non-`YYYY-MM-DD` spellings) raises from **both** functions (review C4) |
+| `test_pinned_now_is_midnight_of_pinned_today` | `now_utc()` is midnight of exactly the date `today_utc()` returns |
 
 There is no parent L2 spec, so there is no Done-when mapping table. The Done-when list below
 stands in.

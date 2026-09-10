@@ -99,3 +99,40 @@ def test_clock_override(monkeypatch: pytest.MonkeyPatch) -> None:
         clock.today_utc()
     with pytest.raises(ValueError):
         clock.now_utc()
+
+
+@pytest.mark.parametrize(
+    "pin",
+    ["2026-09-09T12:34:56", "2026-09-09T12:34:56+00:00", "2026-09-09 12:34:56", "20260909"],
+)
+def test_a_datetime_shaped_clock_pin_fails_in_both_functions(
+    monkeypatch: pytest.MonkeyPatch, pin: str
+) -> None:
+    """One parser, one answer. today_utc() used to raise on these while now_utc() happily
+    returned 12:34:56 UTC — a pin that half-worked is worse than one that fails."""
+    from shared import clock
+
+    monkeypatch.setenv("SNAP_TODAY", pin)
+
+    with pytest.raises(ValueError):
+        clock.today_utc()
+    with pytest.raises(ValueError):
+        clock.now_utc()
+
+
+def test_pinned_now_is_midnight_of_pinned_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    from shared import clock
+
+    monkeypatch.setenv("SNAP_TODAY", "2026-09-09")
+
+    assert clock.now_utc().date() == clock.today_utc()
+    assert clock.now_utc().timetz() == dt.time(0, 0, tzinfo=dt.UTC)
+
+
+def test_a_blank_clock_pin_falls_back_to_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    from shared import clock
+
+    monkeypatch.setenv("SNAP_TODAY", "   ")
+
+    assert clock.today_utc() == dt.datetime.now(dt.UTC).date()
+    assert clock.now_utc().tzinfo is dt.UTC
