@@ -224,7 +224,7 @@ def build_observation(
     source_native_id: str | None = None,
     observed_price_age_seconds: int | None = None,
     data_quality: DataQuality = DataQuality.OK,
-    quality_flags: list[QualityFlag] | None = None,
+    quality_flags: Sequence[QualityFlag] | None = None,
 ) -> FareObservation:
     """Derive route_key and observation_id, then construct. The only sanctioned way to
     create a FareObservation from source data."""
@@ -493,7 +493,9 @@ def use_fixtures() -> bool:
 
 ```python
 from datetime import date, datetime
-from pydantic import BaseModel, ConfigDict
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 RouteKeyFilter = Annotated[str, Field(pattern=r"^[A-Z]{3}-[A-Z]{3}$")]
 Limit = Annotated[int, Field(strict=True, ge=0)]
