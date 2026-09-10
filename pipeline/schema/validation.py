@@ -38,6 +38,8 @@ class ViolationCode(StrEnum):
     RETURN_DATE_MISMATCH = "return_date_mismatch"
     OBSERVATION_ID_MISMATCH = "observation_id_mismatch"
     BAD_SCHEMA_VERSION = "bad_schema_version"
+    OUT_OF_RANGE = "out_of_range"
+    BAD_INGEST_RUN_ID = "bad_ingest_run_id"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +91,7 @@ _MODEL_CODES: tuple[ViolationCode, ...] = (
     ViolationCode.NON_UTC_TIMESTAMP,
     ViolationCode.BAD_ROUTE_KEY,
     ViolationCode.RETURN_DATE_MISMATCH,
+    ViolationCode.BAD_INGEST_RUN_ID,
 )
 
 _MODEL_CODE_FIELDS: dict[ViolationCode, str] = {
@@ -96,6 +99,7 @@ _MODEL_CODE_FIELDS: dict[ViolationCode, str] = {
     ViolationCode.NON_UTC_TIMESTAMP: "fetched_at",
     ViolationCode.BAD_ROUTE_KEY: "route_key",
     ViolationCode.RETURN_DATE_MISMATCH: "return_date",
+    ViolationCode.BAD_INGEST_RUN_ID: "ingest_run_id",
 }
 
 _STRING_SHAPE_ERRORS: frozenset[str] = frozenset(
@@ -105,6 +109,10 @@ _STRING_SHAPE_ERRORS: frozenset[str] = frozenset(
 _BOUND_ERRORS: frozenset[str] = frozenset(
     {"greater_than", "greater_than_equal", "less_than", "less_than_equal"}
 )
+
+# An int64 field that is too large is out of range, not "nonpositive": amount_minor is the
+# one field whose lower bound has a code of its own, so only its lower-bound error keeps it.
+_LOWER_BOUND_ERRORS: frozenset[str] = frozenset({"greater_than", "greater_than_equal"})
 
 
 def _violation_from_error(error: dict[str, Any]) -> Violation:
@@ -125,7 +133,13 @@ def _violation_from_error(error: dict[str, Any]) -> Violation:
     if error_type == "enum":
         return Violation(ViolationCode.BAD_ENUM, name, message)
 
-    if error_type in _STRING_SHAPE_ERRORS or error_type in _BOUND_ERRORS:
+    if error_type in _BOUND_ERRORS:
+        code = _FIELD_CODES.get(name or "", ViolationCode.OUT_OF_RANGE)
+        if code is ViolationCode.NONPOSITIVE_AMOUNT and error_type not in _LOWER_BOUND_ERRORS:
+            code = ViolationCode.OUT_OF_RANGE
+        return Violation(code, name, message)
+
+    if error_type in _STRING_SHAPE_ERRORS:
         code = _FIELD_CODES.get(name or "", ViolationCode.WRONG_TYPE)
         return Violation(code, name, message)
 

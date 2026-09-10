@@ -14,6 +14,9 @@ from pipeline.schema.enums import Cabin, PriceKind, Source, TripType
 from pipeline.schema.identity import observation_id_for
 from pipeline.schema.record import build_observation
 
+# ingest_run_id is not a natural-key field; it only has to be a UUID (L0 §3).
+RUN_ID: str = "11111111-1111-5111-8111-111111111111"
+
 # (kwargs, canonical string, observation id) — the table in SF-03-build §2.3, verbatim.
 FIXED_VECTORS: tuple[tuple[dict[str, object], str, str], ...] = (
     (
@@ -216,7 +219,7 @@ def test_observation_id_for_recomputes_from_a_record() -> None:
         amount_minor=42000,
         currency="USD",
         price_kind=PriceKind.CALENDAR_CHEAPEST,
-        ingest_run_id="run-1",
+        ingest_run_id=RUN_ID,
     )
 
     assert record.observation_id == FIXED_VECTORS[0][2]
@@ -235,7 +238,7 @@ def test_fetched_at_time_of_day_does_not_change_the_id() -> None:
         amount_minor=42000,
         currency="USD",
         price_kind=PriceKind.CALENDAR_CHEAPEST,
-        ingest_run_id="run-1",
+        ingest_run_id=RUN_ID,
     )
     morning = build_observation(fetched_at=datetime(2026, 9, 9, 6, 0, tzinfo=UTC), **kwargs)
     midnight = build_observation(fetched_at=datetime(2026, 9, 9, 23, 59, tzinfo=UTC), **kwargs)

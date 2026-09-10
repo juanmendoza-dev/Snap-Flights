@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -16,6 +17,17 @@ from pipeline.schema.enums import Cabin, DataQuality, PriceKind, QualityFlag, So
 from pipeline.schema.identity import observation_id
 
 SCHEMA_VERSION: int = 1
+
+#: Every int64-backed field is bounded by the physical Arrow type, not by Python's
+#: unbounded int: an out-of-range value used to validate here and raise OverflowError
+#: during Arrow conversion, after earlier partition groups had already been written.
+#: ``strict`` additionally rejects ``True``/``1.0`` for a count or an amount.
+INT64_MAX: int = 2**63 - 1
+
+Count = Annotated[int, Field(strict=True, ge=0, le=INT64_MAX)]
+PositiveCount = Annotated[int, Field(strict=True, ge=1, le=INT64_MAX)]
+AmountMinor = Annotated[int, Field(strict=True, gt=0, le=INT64_MAX)]
+SchemaVersion = Annotated[int, Field(strict=True, ge=1, le=INT64_MAX)]
 
 IataCode = Annotated[str, Field(min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")]
 RouteKey = Annotated[str, Field(min_length=7, max_length=7, pattern=r"^[A-Z]{3}-[A-Z]{3}$")]
@@ -32,7 +44,7 @@ class FareObservation(BaseModel):
     source: Source
     source_native_id: str | None = None
     fetched_at: datetime
-    observed_price_age_seconds: int | None = None
+    observed_price_age_seconds: Count | None = None
     origin: IataCode
     destination: IataCode
     route_key: RouteKey
@@ -40,17 +52,17 @@ class FareObservation(BaseModel):
     return_date: date | None = None
     trip_type: TripType
     cabin: Cabin
-    passengers: int = Field(ge=1)
-    stops_outbound: int | None = Field(default=None, ge=0)
-    stops_return: int | None = Field(default=None, ge=0)
+    passengers: PositiveCount
+    stops_outbound: Count | None = None
+    stops_return: Count | None = None
     carrier_primary: str | None = Field(default=None, pattern=r"^[A-Z0-9]{2}$")
-    amount_minor: int = Field(gt=0)
+    amount_minor: AmountMinor
     currency: CurrencyCode
     price_kind: PriceKind
     data_quality: DataQuality = DataQuality.OK
     quality_flags: list[QualityFlag] | None = None
     ingest_run_id: str
-    schema_version: int = SCHEMA_VERSION
+    schema_version: SchemaVersion = SCHEMA_VERSION
 
     @field_validator("fetched_at")
     @classmethod
@@ -65,6 +77,18 @@ class FareObservation(BaseModel):
         if v.utcoffset() != timedelta(0):
             raise ValueError(f"non_utc_timestamp: fetched_at offset is {v.utcoffset()}, not UTC")
         return v.astimezone(UTC)
+
+    @field_validator("ingest_run_id")
+    @classmethod
+    def _ingest_run_id_is_a_uuid(cls, v: str) -> str:
+        """L0 §3 types ingest_run_id as a uuid, and L0 §6 puts it straight into a file
+        name. Parse it and keep the canonical lowercase-hyphenated form, so the dedup
+        tiebreaker orders on one spelling and a run id can never carry a path separator."""
+        try:
+            parsed = UUID(v)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"bad_ingest_run_id: ingest_run_id {v!r} is not a UUID") from exc
+        return str(parsed)
 
     @model_validator(mode="after")
     def _route_key_matches_endpoints(self) -> FareObservation:
@@ -163,6 +187,7 @@ def build_observation(
 
 
 __all__ = [
+    "INT64_MAX",
     "SCHEMA_VERSION",
     "Cabin",
     "CurrencyCode",

@@ -114,6 +114,13 @@ from pipeline.schema.enums import Cabin, DataQuality, PriceKind, QualityFlag, So
 
 SCHEMA_VERSION: int = 1
 
+INT64_MAX: int = 2**63 - 1
+
+Count = Annotated[int, Field(strict=True, ge=0, le=INT64_MAX)]
+PositiveCount = Annotated[int, Field(strict=True, ge=1, le=INT64_MAX)]
+AmountMinor = Annotated[int, Field(strict=True, gt=0, le=INT64_MAX)]
+SchemaVersion = Annotated[int, Field(strict=True, ge=1, le=INT64_MAX)]
+
 IataCode = Annotated[str, Field(min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")]
 RouteKey = Annotated[str, Field(min_length=7, max_length=7, pattern=r"^[A-Z]{3}-[A-Z]{3}$")]
 CurrencyCode = Annotated[str, Field(min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")]
@@ -129,7 +136,7 @@ class FareObservation(BaseModel):
     source: Source
     source_native_id: str | None = None
     fetched_at: datetime
-    observed_price_age_seconds: int | None = None
+    observed_price_age_seconds: Count | None = None
     origin: IataCode
     destination: IataCode
     route_key: RouteKey
@@ -137,22 +144,28 @@ class FareObservation(BaseModel):
     return_date: date | None = None
     trip_type: TripType
     cabin: Cabin
-    passengers: int = Field(ge=1)
-    stops_outbound: int | None = Field(default=None, ge=0)
-    stops_return: int | None = Field(default=None, ge=0)
+    passengers: PositiveCount
+    stops_outbound: Count | None = None
+    stops_return: Count | None = None
     carrier_primary: str | None = Field(default=None, pattern=r"^[A-Z0-9]{2}$")
-    amount_minor: int = Field(gt=0)
+    amount_minor: AmountMinor
     currency: CurrencyCode
     price_kind: PriceKind
     data_quality: DataQuality = DataQuality.OK
     quality_flags: list[QualityFlag] | None = None
     ingest_run_id: str
-    schema_version: int = SCHEMA_VERSION
+    schema_version: SchemaVersion = SCHEMA_VERSION
 
     @field_validator("fetched_at")
     @classmethod
     def _fetched_at_is_utc_aware(cls, v: datetime) -> datetime:
         """tz-aware and UTC (L0 §0). A naive datetime is an error, not something to guess at."""
+
+    @field_validator("ingest_run_id")
+    @classmethod
+    def _ingest_run_id_is_a_uuid(cls, v: str) -> str:
+        """L0 §3 types it as a uuid and L0 §6 puts it straight into a file name. Parsed,
+        and kept in the canonical lowercase-hyphenated form."""
 
     @model_validator(mode="after")
     def _route_key_matches_endpoints(self) -> FareObservation: ...
@@ -165,6 +178,19 @@ class FareObservation(BaseModel):
     def fetched_date(self) -> date:
         """UTC calendar date of fetched_at — the partition key and a natural-key field (L0 §6)."""
 ```
+
+**Bounded, strict integers (review C2).** Every int64-backed field is bounded by the
+physical Arrow type rather than by Python's unbounded `int`: `2**63` used to validate here
+and raise `OverflowError` during Arrow conversion, after earlier partition groups had
+already been published. `strict=True` additionally rejects `True` and `1.0` for a count or
+an amount — a boolean price of 1 is not a price. `schema_version` is bounded but not pinned
+to `SCHEMA_VERSION` at the field level, so a future v2 file still parses; `validate()` is
+what requires the version this code speaks.
+
+**`ingest_run_id` is a UUID (review C2).** It is not a natural-key field, so canonicalising
+it cannot move an `observation_id`. It *is* the dedup tiebreaker and a path segment, so one
+spelling per run is what makes both well-defined — and an unrestricted string in a file name
+is how `x/../../../../../escaped` wrote outside the store root.
 
 Model construction does **not** compute `observation_id`. Producers call
 `observation_id(...)` and pass it in; `validate()` checks it matches. This keeps the model a
@@ -284,6 +310,8 @@ class ViolationCode(StrEnum):
     RETURN_DATE_MISMATCH = "return_date_mismatch"
     OBSERVATION_ID_MISMATCH = "observation_id_mismatch"
     BAD_SCHEMA_VERSION = "bad_schema_version"
+    OUT_OF_RANGE = "out_of_range"          # an int64 field outside its bounds (review C2)
+    BAD_INGEST_RUN_ID = "bad_ingest_run_id"  # not a UUID (review C2)
 
 @dataclass(frozen=True, slots=True)
 class Violation:
@@ -314,7 +342,13 @@ naive `fetched_at`; non-UTC `fetched_at`; lowercase or 2-letter IATA; lowercase 
 `route_key` disagreeing with `origin`/`destination`; `amount_minor` of `0` and of `-1`;
 `return_date` set on a `one_way`; `return_date` null on a `round_trip`; an enum value
 outside `Cabin`/`PriceKind`/`Source`/`DataQuality`; an `observation_id` that does not
-recompute; `schema_version` != 1.
+recompute; `schema_version` != 1; a boolean or integral-float in an int64 field; an int64
+field above `INT64_MAX` or a negative `observed_price_age_seconds`; an `ingest_run_id` that
+is not a UUID.
+
+`NONPOSITIVE_AMOUNT` is `amount_minor`'s **lower**-bound code only. An `amount_minor` above
+`INT64_MAX` reports `OUT_OF_RANGE`, like every other int64 bound failure — calling `2**63`
+"nonpositive" would be worse than useless to a quarantine report.
 
 ### 2.5 `pipeline/schema/arrow.py` — the pinned physical schema
 

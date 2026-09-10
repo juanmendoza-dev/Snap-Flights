@@ -18,6 +18,8 @@ from pipeline.schema import (
     table_to_records,
 )
 
+RUN_ID: str = "11111111-1111-5111-8111-111111111111"
+
 EXPECTED_FIELDS: tuple[tuple[str, pa.DataType, bool], ...] = (
     ("observation_id", pa.string(), False),
     ("source", pa.string(), False),
@@ -58,7 +60,7 @@ def calendar_row() -> object:
         amount_minor=42000,
         currency="USD",
         price_kind=PriceKind.CALENDAR_CHEAPEST,
-        ingest_run_id="run-a",
+        ingest_run_id=RUN_ID,
         observed_price_age_seconds=3600,
     )
 
@@ -76,7 +78,7 @@ def itinerary_row() -> object:
         amount_minor=62000,
         currency="USD",
         price_kind=PriceKind.ITINERARY,
-        ingest_run_id="run-a",
+        ingest_run_id=RUN_ID,
         stops_outbound=1,
         carrier_primary="NH",
         source_native_id="ff-0123456789",

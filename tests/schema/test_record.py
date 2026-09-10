@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from pipeline.schema import Cabin, DataQuality, FareObservation, PriceKind, Source, TripType
-from pipeline.schema.record import SCHEMA_VERSION
+from pipeline.schema.record import INT64_MAX, SCHEMA_VERSION
 
 VALID_ID = "0123456789abcdef"
 
@@ -162,3 +162,70 @@ def test_nullable_fields_accept_values() -> None:
     assert obs.carrier_primary == "BA"
     assert obs.quality_flags is not None
     assert obs.quality_flags[0] == "price_below_floor"
+
+
+# C2 — int64-backed fields are bounded and strict, and ingest_run_id is a UUID.
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["amount_minor", "passengers", "observed_price_age_seconds", "stops_outbound", "stops_return"],
+)
+def test_rejects_boolean_for_an_int64_field(field: str) -> None:
+    """bool is an int subclass; True must not become a price of 1 or a passenger count."""
+    with pytest.raises(ValidationError):
+        FareObservation(**make_kwargs(**{field: True}))
+
+
+@pytest.mark.parametrize("field", ["amount_minor", "passengers", "stops_outbound"])
+def test_rejects_integral_float_for_an_int64_field(field: str) -> None:
+    with pytest.raises(ValidationError):
+        FareObservation(**make_kwargs(**{field: 1.0}))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["amount_minor", "passengers", "observed_price_age_seconds", "stops_outbound", "stops_return"],
+)
+def test_rejects_a_value_above_int64_max(field: str) -> None:
+    """Used to construct, then raise OverflowError during Arrow conversion — after
+    earlier partition groups had already been written."""
+    with pytest.raises(ValidationError):
+        FareObservation(**make_kwargs(**{field: INT64_MAX + 1}))
+
+
+def test_rejects_negative_observed_price_age() -> None:
+    with pytest.raises(ValidationError):
+        FareObservation(**make_kwargs(observed_price_age_seconds=-2))
+
+
+def test_accepts_zero_observed_price_age() -> None:
+    assert (
+        FareObservation(**make_kwargs(observed_price_age_seconds=0)).observed_price_age_seconds == 0
+    )
+
+
+def test_accepts_int64_max_amount() -> None:
+    assert FareObservation(**make_kwargs(amount_minor=INT64_MAX)).amount_minor == INT64_MAX
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "run-1",
+        "",
+        "x/../../../../../escaped",
+        "3f6f5b8e-0f2f-5a1c-9f8a-1d2e3f4a5b6",
+    ],
+)
+def test_rejects_an_ingest_run_id_that_is_not_a_uuid(run_id: str) -> None:
+    with pytest.raises(ValidationError):
+        FareObservation(**make_kwargs(ingest_run_id=run_id))
+
+
+def test_ingest_run_id_is_canonicalised() -> None:
+    """Braces, uppercase and the unhyphenated form all name the same run; the store's
+    dedup tiebreaker and its file names need one spelling."""
+    canonical = "3f6f5b8e-0f2f-5a1c-9f8a-1d2e3f4a5b6c"
+    for spelling in (canonical.upper(), canonical.replace("-", ""), "{" + canonical + "}"):
+        assert FareObservation(**make_kwargs(ingest_run_id=spelling)).ingest_run_id == canonical

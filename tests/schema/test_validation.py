@@ -180,3 +180,34 @@ def test_empty_batch_is_ok() -> None:
 
     assert report.total == 0
     assert report.ok
+
+
+# C2 — the codes the bounded/strict int64 fields and the UUID run id report.
+
+
+def test_overflowing_amount_is_out_of_range_not_nonpositive() -> None:
+    """2**63 used to validate clean and blow up inside Arrow. It is reported as
+    out_of_range: only amount_minor's lower bound is a "nonpositive amount"."""
+    assert codes(valid_row(amount_minor=2**63)) == {ViolationCode.OUT_OF_RANGE}
+
+
+def test_zero_amount_is_still_nonpositive() -> None:
+    assert ViolationCode.NONPOSITIVE_AMOUNT in codes(valid_row(amount_minor=0))
+
+
+def test_boolean_amount_is_a_type_violation() -> None:
+    assert codes(valid_row(amount_minor=True)) == {ViolationCode.WRONG_TYPE}
+
+
+def test_integral_float_amount_is_a_type_violation() -> None:
+    assert codes(valid_row(amount_minor=42000.0)) == {ViolationCode.WRONG_TYPE}
+
+
+def test_negative_source_price_age_is_out_of_range() -> None:
+    assert codes(valid_row(observed_price_age_seconds=-2)) == {ViolationCode.OUT_OF_RANGE}
+
+
+def test_rejects_an_ingest_run_id_that_is_not_a_uuid() -> None:
+    assert codes(valid_row(ingest_run_id="x/../../../../../escaped")) == {
+        ViolationCode.BAD_INGEST_RUN_ID
+    }
