@@ -49,10 +49,15 @@ Produce, per route:
 | `reason` | plain-language string built from the above (no LLM) |
 | `basis` | counts + date range of the observations used — for the "why" panel and auditability |
 
-**Verdict rules (defaults, config in `config/baseline.yaml`):**
-- `book_now` — `price_percentile <= 25` AND `expected_curve` rises ≥ 5% from here.
-- `wait` — `price_percentile >= 60` AND `expected_curve` has a point ≥ 7% below current within 60 days.
-- `neutral` — otherwise.
+`current_price`, `price_percentile`, `expected_low` and the `basis` date endpoints are
+nullable when the data does not support them (decision 0002 §D3): a missing-data prediction
+is `neutral` / `low` with a `data_unavailable_reason` rather than a fabricated price or a
+sentinel percentile.
+
+**Verdict rules (defaults, config in `config/baseline.yaml`; semantics pinned in decision 0002 §D4):**
+- `book_now` — `price_percentile <= 25` AND `expected_curve` rises ≥ 5% **from its current point** over the remaining horizon.
+- `wait` — `price_percentile >= 60` AND `expected_curve` has a point ≥ 7% below **its current point**, strictly after `as_of`, within 60 days.
+- `neutral` — otherwise, and always when the curve is empty or `days_to_departure == 0`.
 
 **Confidence rules:**
 - `low` if < 100 observations in the (route, AP bucket) cell OR coefficient of variation > 0.35.
@@ -63,15 +68,24 @@ Produce, per route:
 
 - Walk-forward over the fixture (later: real) history: at each historical `fetched_date`,
   hide the future, ask the model for a verdict, then score against what the price actually did.
-- Metrics: buy-vs-wait hit rate, average regret ($ paid vs. best achievable in the window),
-  percentile calibration.
+- Metrics: buy-vs-wait hit rate, regret ($ paid vs. best achievable), and `wait`
+  target/window error — scored for the baseline **and** two reference arms
+  (`always_book_now`, and a `hindsight_oracle` labelled as an unachievable lower bound).
+  `wait` pays from an executable policy, not the hindsight minimum (decision 0002 §D5).
+- Historical-rank consistency check (not forward calibration — decision 0002 §D6).
+- Evaluation scenarios are frozen under `models/backtest/scenarios/`, versioned independently
+  of results. The fixture is not edited to make the model win.
 - Output a JSON report (`models/backtest/reports/latest.json`) — E8's public accuracy page reads this.
 
 ## Done when
 
-- `predict()` returns a fully populated `Prediction` for every route in the fixture set.
-- Percentiles are calibrated on the fixture data (a p90 call is beaten ~10% of the time).
-- On the fixture history the backtest reports a buy-vs-wait hit rate **better than always-"book_now"**.
+- `predict()` returns a `Prediction` for every route in the fixture set — fully populated
+  where data supports it, and an honest `neutral` / `low` with a `data_unavailable_reason`
+  where it does not (decision 0002 §D3).
+- Historical-rank consistency holds on the fixture data (a p90 call is beaten ~10% of the time).
+- The backtest **produces** hit rate, regret and `wait` window-error numbers for the baseline
+  alongside `always_book_now` and the `hindsight_oracle` lower bound. Results are recorded,
+  not gated — a loss is reported, not fixed by editing the fixture (decision 0002 §D5).
 - `reason` and `basis` are populated and consistent with the numeric outputs.
 - Everything works with `SNAP_USE_FIXTURES=1` and no `data/snapshots/`.
 - All thresholds are config-driven.
