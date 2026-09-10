@@ -273,25 +273,45 @@ class SnapshotStore:
         self, *, within_days: int = 3, as_of: date | None = None
     ) -> dict[str, date]:
         """source -> most recent fetched_date, for sources seen within the window.
+
+        The window is ``[as_of - within_days, as_of]``, **inclusive at both ends**: as of
+        2026-09-09 with the default ``within_days=3`` it covers the four calendar dates
+        2026-09-06 … 2026-09-09. The upper bound is the point (review C4) — only a lower
+        bound was applied, so asking as of September 1 reported a September 9 observation as
+        recent, and a deterministic historical health check counted data from its own
+        future. ``within_days`` must be a nonnegative plain int; 0 means "today only".
+
         `as_of` defaults to shared.clock.today_utc() — never date.today(), so a pinned
-        SNAP_TODAY makes /health deterministic against the fixture calendar."""
+        SNAP_TODAY makes /health deterministic against the fixture calendar.
+
+        Runs over the same resolved rows as an ordinary read: the shared query builder,
+        so dedup and the rejected-row rule cannot drift from what read()/read_frame() see.
+        """
+        if isinstance(within_days, bool) or not isinstance(within_days, int):
+            raise TypeError(f"within_days must be a plain int, got {within_days!r}")
+        if within_days < 0:
+            raise ValueError(f"within_days must be >= 0, got {within_days}")
+
         targets = self._scan_targets()
         if not targets:
             return {}
 
-        cutoff = (as_of if as_of is not None else today_utc()) - timedelta(days=within_days)
+        resolved_as_of = as_of if as_of is not None else today_utc()
+        window = ReadFilters(
+            fetched_date_from=resolved_as_of - timedelta(days=within_days),
+            fetched_date_to=resolved_as_of,
+        )
+        inner, params = self._build_query(window)
         connection = self._connect()
         try:
             rows = connection.execute(
-                """
+                f"""
                 SELECT source, max(CAST(fetched_at AS DATE)) AS last_fetched_date
-                FROM read_parquet(?, hive_partitioning = 0, union_by_name = true)
-                WHERE data_quality <> 'rejected'
+                FROM ({inner})
                 GROUP BY source
-                HAVING max(CAST(fetched_at AS DATE)) >= ?
                 ORDER BY source
                 """,
-                [targets, cutoff],
+                [targets, *params],
             ).fetchall()
         finally:
             connection.close()

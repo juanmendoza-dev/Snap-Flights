@@ -116,3 +116,39 @@ def test_unset_environment_means_fixtures_off(monkeypatch: pytest.MonkeyPatch) -
 
     assert use_fixtures() is False
     assert load_data_settings().use_fixtures is False
+
+
+# C4 — a component holding injected settings reports THOSE, not the environment.
+
+
+def test_injected_settings_beat_the_environment_in_both_directions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`use_fixtures()` reads the process environment; a store built with explicit
+    settings may legitimately disagree with it. Whatever reports the mode — /health, a
+    scheduler log — has to read `store.settings.use_fixtures`, or an injected live store
+    gets labelled fixture mode and a fixture store gets labelled live (review C4)."""
+    monkeypatch.delenv("SNAP_USE_FIXTURES", raising=False)
+    fixture_store = store_at(tmp_path, use_fixtures=True)
+
+    assert fixture_store.settings.use_fixtures is True
+    assert use_fixtures() is False
+
+    monkeypatch.setenv("SNAP_USE_FIXTURES", "1")
+    live_store = store_at(tmp_path, use_fixtures=False)
+
+    assert live_store.settings.use_fixtures is False
+    assert use_fixtures() is True
+
+
+def test_the_store_behaves_as_its_own_settings_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not just the label: the injected setting drives what is actually scanned."""
+    write_fixture_parquet(tmp_path, [make_observation(route_key="JFK-LHR")])
+    monkeypatch.delenv("SNAP_USE_FIXTURES", raising=False)
+
+    assert store_at(tmp_path, use_fixtures=True).read() != []
+
+    monkeypatch.setenv("SNAP_USE_FIXTURES", "1")
+    assert store_at(tmp_path, use_fixtures=False).read() == []

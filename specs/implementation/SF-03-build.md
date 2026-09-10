@@ -572,7 +572,9 @@ class SnapshotStore:
 
     def sources_with_recent_data(self, *, within_days: int = 3, as_of: date | None = None
                                  ) -> dict[str, date]:
-        """source -> most recent fetched_date, for sources seen within the window.
+        """source -> most recent fetched_date, for sources seen within the window
+        [as_of - within_days, as_of], INCLUSIVE at both ends; within_days is a
+        nonnegative plain int and 0 means "as_of only".
         `as_of` defaults to shared.clock.today_utc() — never date.today(), so a pinned
         SNAP_TODAY makes /health deterministic against the fixture calendar (P0 §Interfaces
         frozen 8). Backs GET /health (SF-07)."""
@@ -1047,7 +1049,10 @@ per-cell counts as everyone else; what differs is which source the surviving row
 5. Rows are already deduplicated on `observation_id` (latest `fetched_at`, then greatest
    `ingest_run_id`). No downstream dedup.
 6. Fixture mode is read via `shared.settings.use_fixtures()` / `load_data_settings()` and
-   **nowhere else**. `api/`'s `/health` fixture flag reads the same accessor.
+   **nowhere else**. A component holding a settings object reports `settings.use_fixtures`
+   — `api/`'s `/health` flag is `store.settings.use_fixtures`, not the bare accessor, since
+   an injected store may legitimately disagree with the environment (review C4).
+   `use_fixtures()` is for code with no settings object to ask.
 7. The fixture dataset is 189,000 rows, all `one_way` / `economy` / `passengers = 1` /
    `USD` / `data_quality = "ok"`, over `fetched_date` 2026-06-12 … 2026-09-09 and
    `depart_date` 2026-06-13 … 2027-01-07, with `days_to_departure` 1–120 for every route on
@@ -1055,7 +1060,10 @@ per-cell counts as everyone else; what differs is which source the surviving row
 8. The 15 route keys are §4.2's list, and `data/fixtures/routes.csv` is the only route file
    that exists in this pass.
 9. `SnapshotStore.sources_with_recent_data(within_days, as_of)` exists and backs
-   `GET /health`.
+   `GET /health`. Its window is `[as_of - within_days, as_of]`, inclusive at both ends
+   (review C4): only a lower bound was applied, so a health check as of September 1
+   reported a September 9 observation as recent. It runs over the same resolved rows as
+   `read()`/`read_frame()`, through the same query builder.
 10. `store.write()` never mutates or deletes an existing file, so a test that writes into a
     `tmp_path` store cannot corrupt the fixtures. It validates the whole batch first and
     raises `InvalidBatchError` rather than publishing any part of an invalid batch, so a

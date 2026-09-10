@@ -52,7 +52,14 @@ def load_data_settings(
 
 
 def use_fixtures() -> bool:
-    """Convenience accessor. api/'s /health fixture flag reads THIS, nothing else."""
+    """The **process** fixture mode, straight from the environment.
+
+    A component that was handed explicit settings must report `settings.use_fixtures`
+    instead: `load_data_settings(use_fixtures=...)` deliberately lets an injected store
+    disagree with the environment, and reading the variable behind its back labels an
+    injected live store "fixture mode" and vice versa (review C4). Use this only where
+    there is no settings object to ask — a process-level default.
+    """
     return _env_use_fixtures()
 
 

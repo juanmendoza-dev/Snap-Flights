@@ -361,3 +361,85 @@ def test_rejects_a_malformed_route_key(route: str) -> None:
 
 def test_an_unknown_but_well_formed_route_key_is_simply_empty(populated_store) -> None:
     assert populated_store.read(ReadFilters(route_key="ZZZ-YYY")) == []
+
+
+# C4 — health bounds the window at both ends and resolves rows like an ordinary read.
+
+
+def test_health_does_not_count_data_from_after_the_as_of_date(populated_store) -> None:
+    """Asking as of September 1 used to report a September 9 observation as recent: only
+    a lower bound was applied, so a historical health check counted its own future."""
+    assert populated_store.sources_with_recent_data(as_of=date(2026, 9, 1)) == {}
+
+
+def test_health_window_is_inclusive_at_both_ends(tmp_path: Path) -> None:
+    """[as_of - within_days, as_of]: as of the 9th with within_days=3 that is the four
+    dates 6th…9th."""
+    store = store_at(tmp_path)
+    for day in (5, 6, 9):
+        store.write([make_observation(fetched_at=datetime(2026, 9, day, 6, 0, tzinfo=UTC))])
+
+    assert store.sources_with_recent_data(within_days=3, as_of=date(2026, 9, 9)) == {
+        "travelpayouts": date(2026, 9, 9)
+    }
+    assert store.sources_with_recent_data(within_days=3, as_of=date(2026, 9, 8)) == {
+        "travelpayouts": date(2026, 9, 6)
+    }
+    assert store.sources_with_recent_data(within_days=0, as_of=date(2026, 9, 5)) == {
+        "travelpayouts": date(2026, 9, 5)
+    }
+    assert store.sources_with_recent_data(within_days=0, as_of=date(2026, 9, 7)) == {}
+
+
+def test_health_reports_the_newest_date_inside_the_window_not_the_newest_overall(
+    tmp_path: Path,
+) -> None:
+    store = store_at(tmp_path)
+    for day in (6, 9):
+        store.write([make_observation(fetched_at=datetime(2026, 9, day, 6, 0, tzinfo=UTC))])
+
+    assert store.sources_with_recent_data(within_days=30, as_of=date(2026, 9, 7)) == {
+        "travelpayouts": date(2026, 9, 6)
+    }
+
+
+def test_health_rejects_a_negative_window(populated_store) -> None:
+    with pytest.raises(ValueError):
+        populated_store.sources_with_recent_data(within_days=-1, as_of=date(2026, 9, 9))
+
+
+@pytest.mark.parametrize("within_days", [True, 1.0, "3"])
+def test_health_rejects_a_window_that_is_not_a_plain_int(
+    populated_store, within_days: object
+) -> None:
+    with pytest.raises(TypeError):
+        populated_store.sources_with_recent_data(within_days=within_days, as_of=date(2026, 9, 9))
+
+
+def test_health_sees_the_same_rows_an_ordinary_read_does(populated_store) -> None:
+    """One query builder, so the rejected-row rule and dedup cannot drift apart."""
+    window = ReadFilters(fetched_date_from=date(2026, 9, 6), fetched_date_to=date(2026, 9, 9))
+    frame = populated_store.read_frame(window)
+    expected = {
+        row["source"]: row["last"]
+        for row in frame.group_by("source")
+        .agg(pl.col("fetched_at").max().dt.date().alias("last"))
+        .to_dicts()
+    }
+
+    assert (
+        populated_store.sources_with_recent_data(within_days=3, as_of=date(2026, 9, 9)) == expected
+    )
+
+
+def test_health_defaults_as_of_to_the_pinned_clock(
+    populated_store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SNAP_TODAY", "2026-09-09")
+    assert populated_store.sources_with_recent_data() == {
+        "fastflights": date(2026, 9, 9),
+        "travelpayouts": date(2026, 9, 9),
+    }
+
+    monkeypatch.setenv("SNAP_TODAY", "2026-09-01")
+    assert populated_store.sources_with_recent_data() == {}

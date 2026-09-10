@@ -275,13 +275,20 @@ def get_health(
     settings: Annotated[ApiSettings, Depends(get_api_settings)],
 ) -> HealthResponse:
     """Liveness + which sources have recent observations + the fixture-mode flag.
-    fixture_mode reads shared.settings.use_fixtures() — the same accessor everything else
-    uses (SF-03-build §9.6). Always 200 while the process is up; a store with no data is
-    reported as sources=[] with routes_loaded from the route file, not an error.
+    fixture_mode is `store.settings.use_fixtures` — the mode of the store this handler was
+    actually given, NOT shared.settings.use_fixtures() (review C4). The store is injected;
+    load_data_settings(use_fixtures=...) deliberately lets it disagree with the process
+    environment, and reading the variable behind the injected store's back labels a live
+    store "fixture mode" and a fixture store "live". `use_fixtures()` stays the accessor
+    for code that has no settings object to ask. Always 200 while the process is up; a
+    store with no data is reported as sources=[] with routes_loaded from the route file,
+    not an error.
 
     Recency is anchored to shared.clock.today_utc(): the handler passes it as
     store.sources_with_recent_data(within_days=settings.health.recent_observation_window_days,
-    as_of=today_utc()), and SourceHealth.recent is computed against that same date.
+    as_of=today_utc()), and SourceHealth.recent is computed against that same date. That
+    window is [as_of - within_days, as_of], inclusive at both ends (SF-03-build §2.8), so a
+    historical as_of never counts data from after it.
     checked_at is shared.clock.now_utc() — the one now_utc() consumer in this pass. Neither
     reads date.today() or datetime.now(), so with SNAP_TODAY pinned the whole /health
     payload is deterministic against the fixture calendar."""
@@ -424,6 +431,7 @@ Supporting tests:
 | Test | Asserts |
 |---|---|
 | `test_health.py::test_status_ok` | 200, `status == "ok"` |
+| `test_health.py::test_fixture_mode_flag_follows_the_injected_store` | the flag is `store.settings.use_fixtures`: a store injected with `use_fixtures=False` reports `false` even with `SNAP_USE_FIXTURES=1` in the environment, and the inverse (review C4) |
 | `test_health.py::test_sources_reported` | both fixture sources present, `last_fetched_date == 2026-09-09` |
 | `test_health.py::test_recent_flag_uses_configured_window` | recency is measured from `shared.clock.today_utc()`: at the pinned `2026-09-09` both fixture sources come back with `last_fetched_date == 2026-09-09` and `recent = True`; with `SNAP_TODAY` monkeypatched to `2026-09-20` the window no longer reaches the newest fixture date and the response carries `sources == []` (SF-03's `sources_with_recent_data()` filters, it does not report stale sources), still `200` with `status == "ok"` |
 | `test_health.py::test_routes_loaded_is_15` | |
