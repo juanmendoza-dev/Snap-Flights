@@ -196,16 +196,25 @@ class BasisOut(BaseModel):
     sources: list[str]
 
 class PredictResponse(BaseModel):
-    """Field order is the order of SF-07's documented payload; FastAPI preserves it."""
+    """Field order is the order of SF-07's documented payload; FastAPI preserves it.
+
+    Nullable fields per decision 0002 §D3: an empty-store or thin-history prediction comes
+    back as verdict=neutral / confidence=low with data_unavailable_reason set and
+    current_price / price_percentile / expected_low null. These map straight through from
+    models.baseline.Prediction — no special-casing in api/. Regenerate api/openapi.json from
+    the empty-store and thin-data branches, not only the fully-populated one."""
     trip_shape: TripShapeOut
-    current_price: CurrentPriceOut
-    price_percentile: int = Field(ge=0, le=100)
+    current_price: CurrentPriceOut | None
+    price_percentile: int | None = Field(default=None, ge=0, le=100)
     verdict: Verdict
     expected_low: ExpectedLowOut | None
     expected_curve: list[CurvePointOut]
     confidence: Confidence
     reason: str
     basis: BasisOut
+    data_unavailable_reason: Literal[
+        "no_current_price", "no_route_history", "thin_route_history", "departure_in_past"
+    ] | None = None
     data_quality_note: str | None = None
 
     @classmethod
@@ -469,13 +478,17 @@ What it may rely on:
 
 1. Three paths: `GET /health`, `POST /predict`, `GET /routes`. Base path is the root; no
    `/v1` prefix in this phase.
-2. `PredictResponse` has exactly the 10 top-level keys of SF-07's documented payload, in
-   that order. Adding a key is a spec change.
+2. `PredictResponse` has exactly 11 top-level keys, in that order — SF-07's original 10 plus
+   `data_unavailable_reason` (decision 0002 §D3), which sits directly before
+   `data_quality_note`. The contract tests that count keys and the documented-payload table
+   must be updated to match.
 3. `basis` is serialised with `from` / `to`, not `from_`.
 4. Every 4xx/5xx body is `ErrorBody` (`error`, `message`, `field`) — never FastAPI's
    default `{"detail": ...}`.
-5. `price_percentile` is `0..100` and **low means cheap** (SF-06-build §8.4).
-6. `expected_low` is `null` unless `verdict == "wait"`.
+5. `price_percentile` is `0..100` and **low means cheap** (SF-06-build §8.4), or `null` when
+   there is no history to rank against (decision 0002 §D3).
+6. `expected_low` is `null` unless `verdict == "wait"`. `current_price` is `null` only when
+   no store price exists and the caller supplied none.
 7. `expected_curve` is descending by `days_to_departure`, first point is today's, where
    "today" is `shared.clock.today_utc()` (P0 §Interfaces frozen 8) — the same date returned
    in `GET /routes`'s `as_of` and used for the `depart_date` 400s.

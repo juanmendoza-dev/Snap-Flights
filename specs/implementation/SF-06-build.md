@@ -9,6 +9,29 @@ Implements SF-06 exactly: feature builders over `store.read_frame()`, the baseli
 `predict()`, and the walk-forward backtest. Descriptive statistics only — no training, no ML
 dependency.
 
+> **Amended by decision 0002 — read it before implementing §4 and §5.** The technical review
+> (`specs/review/03-prediction.md`) found this spec self-contradictory in three places.
+> Decision 0002 resolves them and **overrides** the following, which are not yet rewritten
+> inline below:
+>
+> - **§4.1 types** — `current_price`, `price_percentile`, `expected_low`, `basis.from_/to`
+>   are nullable; add `data_unavailable_reason`. A missing-data `predict()` returns
+>   `neutral` / `low` with that reason set (0002 §D3), not `price_percentile = 50`.
+> - **§4.3 `find_expected_low` / §4.4 `decide_verdict`** — the curve result carries `as_of`
+>   and `dtd_now` explicitly (not inferred from the first surviving point). `wait` and
+>   `book_now` compare the curve against **its own current point**, and `wait`'s eligible
+>   points are strictly after `as_of`; `dtd_now == 0` is always `neutral` (0002 §D4).
+> - **§5 scoring + "If the baseline does not beat always-`book_now`"** — the fixture is
+>   never edited to force a win, and there is no win gate. Score the baseline plus
+>   `always_book_now` and a labelled `hindsight_oracle` lower bound. `wait` pays from the
+>   executable policy in 0002 §D5, not the hindsight minimum. Add `target_error_minor` and
+>   `window_hit`. Scenarios freeze under `models/backtest/scenarios/`.
+> - **§5 calibration + §6 test** — rename to historical-rank consistency (0002 §D6). Split
+>   the "every field non-null" test into a populated-route case and an empty/thin case.
+>
+> P3/P4/P5/P8 from the review are deferred to E2 Phase 2 (0002 "Deferred") and do not block
+> this build.
+
 ## Depends on
 
 - SF-03 on `main`, and specifically the interfaces frozen in `SF-03-build.md` §9.
