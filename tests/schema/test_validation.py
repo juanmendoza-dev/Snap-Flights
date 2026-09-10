@@ -3,15 +3,19 @@
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 
+import pytest
+
 from pipeline.schema import (
     Cabin,
     FareObservation,
+    InvalidBatchError,
     PriceKind,
     Source,
     TripType,
     build_observation,
     validate,
     validate_batch,
+    validated_batch,
 )
 from pipeline.schema.validation import ViolationCode
 
@@ -211,3 +215,51 @@ def test_rejects_an_ingest_run_id_that_is_not_a_uuid() -> None:
     assert codes(valid_row(ingest_run_id="x/../../../../../escaped")) == {
         ViolationCode.BAD_INGEST_RUN_ID
     }
+
+
+# C1 — a FareObservation instance is not evidence that it was ever validated.
+
+
+def valid_record() -> FareObservation:
+    return FareObservation.model_validate(valid_row())
+
+
+def test_validate_catches_a_field_smuggled_in_by_model_copy() -> None:
+    """model_copy(update=...) runs no validators. validate() used to check only the id and
+    the schema version for a model instance, so this copy reported clean."""
+    assert codes(valid_record().model_copy(update={"amount_minor": -1})) == {
+        ViolationCode.NONPOSITIVE_AMOUNT
+    }
+
+
+def test_validate_catches_a_field_smuggled_in_by_model_construct() -> None:
+    row = valid_row()
+    row["currency"] = "usd"
+    assert ViolationCode.BAD_CURRENCY in codes(FareObservation.model_construct(**row))
+
+
+def test_validate_agrees_on_a_model_and_its_own_dump() -> None:
+    record = valid_record()
+    assert validate(record) == validate(record.model_dump()) == []
+
+
+def test_validated_batch_returns_rebuilt_records() -> None:
+    record = valid_record()
+    assert validated_batch([record, record.model_dump()]) == [record, record]
+
+
+def test_validated_batch_raises_with_the_whole_report() -> None:
+    good = valid_record()
+    with pytest.raises(InvalidBatchError) as caught:
+        validated_batch(
+            [good, good.model_copy(update={"amount_minor": -1}), valid_row(origin="jfk")]
+        )
+
+    report = caught.value.report
+    assert (report.total, report.valid, report.invalid) == (3, 1, 2)
+    assert ViolationCode.NONPOSITIVE_AMOUNT in report.counts_by_code
+    assert ViolationCode.BAD_IATA in report.counts_by_code
+
+
+def test_invalid_batch_error_is_a_value_error() -> None:
+    assert issubclass(InvalidBatchError, ValueError)

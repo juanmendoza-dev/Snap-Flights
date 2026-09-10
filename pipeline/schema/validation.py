@@ -8,6 +8,11 @@ rules live on the Pydantic model; this module maps a pydantic error back to a st
 Two rules cannot live on the model and are checked here: the ``observation_id`` must
 recompute from the record's own natural key (L0 §2), and ``schema_version`` must be the
 version this code speaks.
+
+A :class:`FareObservation` instance is **not** trusted for being one. ``model_copy(update=)``
+and ``model_construct()`` both produce instances that never met a validator, so every entry
+point here revalidates from the record's own dumped field values (review C1). Class identity
+is not evidence.
 """
 
 from __future__ import annotations
@@ -40,6 +45,18 @@ class ViolationCode(StrEnum):
     BAD_SCHEMA_VERSION = "bad_schema_version"
     OUT_OF_RANGE = "out_of_range"
     BAD_INGEST_RUN_ID = "bad_ingest_run_id"
+
+
+class InvalidBatchError(ValueError):
+    """A batch crossing a trust boundary contained invalid rows.
+
+    Carries the full :class:`BatchReport` so a caller can quarantine by violation code
+    rather than by parsing prose. A ``ValueError`` so existing broad handlers still catch it.
+    """
+
+    def __init__(self, report: BatchReport) -> None:
+        super().__init__(f"batch contains invalid rows:\n{report}")
+        self.report = report
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +163,9 @@ def _violation_from_error(error: dict[str, Any]) -> Violation:
     return Violation(ViolationCode.WRONG_TYPE, name, message)
 
 
-def _post_construction_violations(record: FareObservation) -> list[Violation]:
+def logical_violations(record: FareObservation) -> list[Violation]:
+    """The two rules that cannot live on the model: the id recomputes from the record's own
+    natural key (L0 §2), and the schema version is the one this code speaks."""
     violations: list[Violation] = []
 
     expected_id = observation_id_for(record)
@@ -172,41 +191,75 @@ def _post_construction_violations(record: FareObservation) -> list[Violation]:
     return violations
 
 
-def validate(record: FareObservation | dict[str, object]) -> list[Violation]:
-    """Empty list == valid. Accepts a raw dict (from Parquet) or a built model."""
-    if isinstance(record, FareObservation):
-        return _post_construction_violations(record)
+Record = FareObservation | dict[str, object]
 
+
+def _rebuild(record: Record) -> tuple[FareObservation | None, list[Violation]]:
+    """Revalidate one row from its own field values. A built model is dumped first and put
+    back through the validators: an instance is not evidence that it was ever validated."""
+    values = record.model_dump() if isinstance(record, FareObservation) else record
     try:
-        built = FareObservation.model_validate(record)
+        built = FareObservation.model_validate(values)
     except ValidationError as exc:
-        return [_violation_from_error(error) for error in exc.errors()]
+        return None, [_violation_from_error(error) for error in exc.errors()]
+    return built, logical_violations(built)
 
-    return _post_construction_violations(built)
 
+class _Accumulator:
+    """Counts by code and the capped sample, shared by validate_batch and validated_batch."""
 
-def validate_batch(records: Iterable[FareObservation | dict[str, object]]) -> BatchReport:
-    """Structured report with counts by violation type (SF-03 'What to build' §1)."""
-    total = 0
-    invalid = 0
-    counts: dict[ViolationCode, int] = {}
-    sample: list[tuple[int, Violation]] = []
+    def __init__(self) -> None:
+        self.total = 0
+        self.invalid = 0
+        self.counts: dict[ViolationCode, int] = {}
+        self.sample: list[tuple[int, Violation]] = []
 
-    for index, record in enumerate(records):
-        total += 1
-        violations = validate(record)
+    def add(self, index: int, violations: list[Violation]) -> None:
+        self.total += 1
         if not violations:
-            continue
-        invalid += 1
+            return
+        self.invalid += 1
         for violation in violations:
-            counts[violation.code] = counts.get(violation.code, 0) + 1
-            if len(sample) < SAMPLE_LIMIT:
-                sample.append((index, violation))
+            self.counts[violation.code] = self.counts.get(violation.code, 0) + 1
+            if len(self.sample) < SAMPLE_LIMIT:
+                self.sample.append((index, violation))
 
-    return BatchReport(
-        total=total,
-        valid=total - invalid,
-        invalid=invalid,
-        counts_by_code=counts,
-        sample=sample,
-    )
+    def report(self) -> BatchReport:
+        return BatchReport(
+            total=self.total,
+            valid=self.total - self.invalid,
+            invalid=self.invalid,
+            counts_by_code=self.counts,
+            sample=self.sample,
+        )
+
+
+def validate(record: Record) -> list[Violation]:
+    """Empty list == valid. Accepts a raw dict (from Parquet) or a built model."""
+    return _rebuild(record)[1]
+
+
+def validate_batch(records: Iterable[Record]) -> BatchReport:
+    """Structured report with counts by violation type (SF-03 'What to build' §1)."""
+    accumulator = _Accumulator()
+    for index, record in enumerate(records):
+        accumulator.add(index, validate(record))
+    return accumulator.report()
+
+
+def validated_batch(records: Iterable[Record]) -> list[FareObservation]:
+    """Every row, revalidated and rebuilt — or :class:`InvalidBatchError` with the full
+    report. This is the trust boundary: the store writes and canonical reconstruction both
+    go through it, so no unvalidated instance reaches Parquet or comes back out of it."""
+    accumulator = _Accumulator()
+    built: list[FareObservation] = []
+    for index, record in enumerate(records):
+        record_built, violations = _rebuild(record)
+        accumulator.add(index, violations)
+        if record_built is not None and not violations:
+            built.append(record_built)
+
+    report = accumulator.report()
+    if not report.ok:
+        raise InvalidBatchError(report)
+    return built

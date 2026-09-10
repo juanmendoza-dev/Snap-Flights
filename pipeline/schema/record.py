@@ -7,6 +7,7 @@ spec-level change.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
@@ -60,7 +61,7 @@ class FareObservation(BaseModel):
     currency: CurrencyCode
     price_kind: PriceKind
     data_quality: DataQuality = DataQuality.OK
-    quality_flags: list[QualityFlag] | None = None
+    quality_flags: tuple[QualityFlag, ...] | None = None
     ingest_run_id: str
     schema_version: SchemaVersion = SCHEMA_VERSION
 
@@ -138,7 +139,7 @@ def build_observation(
     source_native_id: str | None = None,
     observed_price_age_seconds: int | None = None,
     data_quality: DataQuality = DataQuality.OK,
-    quality_flags: list[QualityFlag] | None = None,
+    quality_flags: Sequence[QualityFlag] | None = None,
 ) -> FareObservation:
     """Derive route_key and observation_id, then construct. The only sanctioned way to
     create a FareObservation from source data."""
@@ -186,6 +187,30 @@ def build_observation(
     )
 
 
+def with_quality(
+    record: FareObservation,
+    *,
+    data_quality: DataQuality,
+    quality_flags: Sequence[QualityFlag] | None = None,
+) -> FareObservation:
+    """A revalidated copy carrying a new quality verdict — the sanctioned way to stamp
+    quality on a frozen record (review C1).
+
+    ``model_copy(update=...)`` skips every validator, so a stamping pass could carry an
+    invalid value through the model unchallenged: a copy with ``amount_minor=-1`` used to
+    validate clean and reach Parquet. This dumps the record and puts the whole thing back
+    through the model.
+
+    Field rules only: a record whose *fields* no longer validate cannot be stamped at all.
+    Representing an invalid record so it can be quarantined is review S3's open question and
+    is owned by SF-05, not by this helper.
+    """
+    values = record.model_dump()
+    values["data_quality"] = data_quality
+    values["quality_flags"] = None if quality_flags is None else tuple(quality_flags)
+    return FareObservation.model_validate(values)
+
+
 __all__ = [
     "INT64_MAX",
     "SCHEMA_VERSION",
@@ -201,4 +226,5 @@ __all__ = [
     "Source",
     "TripType",
     "build_observation",
+    "with_quality",
 ]

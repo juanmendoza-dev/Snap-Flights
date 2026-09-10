@@ -5,6 +5,11 @@ under ``data/snapshots/fare_observations/``. Files are never rewritten or delete
 repeated write lands beside the first and read-time dedup resolves the overlap: the row with
 the latest ``fetched_at`` wins, ties broken by the greater ``ingest_run_id``.
 
+``write()`` is the store's trust boundary: it revalidates every record from its own field
+values before anything is grouped, deduped or published. ``read()`` revalidates again on
+canonical reconstruction; ``read_frame()`` trusts the write gate, because revalidating a
+whole training scan row by row would defeat the point of the bulk path.
+
 ``read()`` and ``read_frame()`` share one query builder so the spec-literal path and the bulk
 path can never diverge. ``read_frame()`` returns the frozen schema of SF-03-build §6 — the
 same columns, order and dtypes for an empty result as for a full one.
@@ -20,11 +25,13 @@ from pathlib import Path
 
 import duckdb
 import polars as pl
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from pipeline.schema.arrow import COLUMN_ORDER, FARE_OBSERVATION_ARROW_SCHEMA, records_to_table
 from pipeline.schema.arrow import table_to_records as arrow_table_to_records
 from pipeline.schema.record import FareObservation
+from pipeline.schema.validation import validated_batch
 from pipeline.store.filters import ReadFilters, as_list
 from pipeline.store.paths import next_free_part_path, part_files, scan_glob
 from shared.clock import today_utc
@@ -84,18 +91,28 @@ class SnapshotStore:
         return self.settings.snapshots_root
 
     def write(self, records: Sequence[FareObservation]) -> WriteResult:
-        """Group by (source, route_key, fetched_date); dedup within the batch on
-        observation_id keeping the LAST occurrence; write one
+        """Validate the whole batch, then group by (source, route_key, fetched_date);
+        dedup within the batch on observation_id keeping the LAST occurrence; write one
         part-{ingest_run_id}.parquet per group under the L0 §6 layout. Never rewrites
         or deletes an existing file: if the target path exists, a numeric suffix is
-        appended (part-{run}-002.parquet). Empty batch is a no-op returning zeros."""
+        appended (part-{run}-002.parquet). Empty batch is a no-op returning zeros.
+
+        Validation is mandatory and comes first (review C1/C2). Every record is rebuilt
+        from its own field values — being a FareObservation instance proves nothing, since
+        model_copy(update=...) and model_construct() both skip the validators — and an
+        invalid batch raises InvalidBatchError carrying the full report, before dedup has
+        chosen a winner or a single file has been published. Arrow conversion of every
+        group happens before the first write for the same reason: a value that overflows
+        int64 used to fail mid-publication, with earlier partitions already on disk."""
         if not records:
             return WriteResult(files_written=0, records_written=0, duplicates_dropped=0, paths=[])
 
+        validated = validated_batch(records)
+
         deduped: dict[str, FareObservation] = {}
-        for record in records:
+        for record in validated:
             deduped[record.observation_id] = record
-        duplicates_dropped = len(records) - len(deduped)
+        duplicates_dropped = len(validated) - len(deduped)
 
         groups: dict[tuple[str, str, str, str], list[FareObservation]] = {}
         for record in deduped.values():
@@ -107,8 +124,10 @@ class SnapshotStore:
             )
             groups.setdefault(key, []).append(record)
 
-        paths: list[Path] = []
-        written = 0
+        # Both loops run to completion before the first file is written: path construction
+        # and Arrow conversion are where a bad value still shows up, and a half-published
+        # batch is not something an append-only store can take back.
+        planned: list[tuple[Path, pa.Table, int]] = []
         for (source, route_key, _fetched_date, ingest_run_id), group in sorted(groups.items()):
             target = next_free_part_path(
                 self.snapshots_root,
@@ -117,9 +136,14 @@ class SnapshotStore:
                 fetched_date=group[0].fetched_date,
                 ingest_run_id=ingest_run_id,
             )
+            planned.append((target, records_to_table(group), len(group)))
+
+        paths: list[Path] = []
+        written = 0
+        for target, table, count in planned:
             target.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(
-                records_to_table(group),
+                table,
                 target,
                 compression=PART_COMPRESSION,
                 compression_level=PART_COMPRESSION_LEVEL,
@@ -127,7 +151,7 @@ class SnapshotStore:
                 write_statistics=True,
             )
             paths.append(target)
-            written += len(group)
+            written += count
 
         return WriteResult(
             files_written=len(paths),
@@ -218,7 +242,12 @@ class SnapshotStore:
 
     def read(self, filters: ReadFilters | None = None) -> list[FareObservation]:
         """Spec-literal path: canonical records. Convenience for tests and small reads.
-        Do not call this for whole-route history — use read_frame()."""
+        Do not call this for whole-route history — use read_frame().
+
+        Reconstruction revalidates every row, id and schema version included (review C1);
+        read_frame() does not, and is not meant to — it is the bulk path, and write() is
+        the gate that keeps invalid rows out of the store in the first place. The two
+        agree on every row that came in through write()."""
         table = self.read_frame(filters).to_arrow().cast(FARE_OBSERVATION_ARROW_SCHEMA)
         return arrow_table_to_records(table)
 

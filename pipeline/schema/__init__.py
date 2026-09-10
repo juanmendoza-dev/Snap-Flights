@@ -15,13 +15,20 @@ from pipeline.schema.enums import (
     TripType,
 )
 from pipeline.schema.identity import NATURAL_KEY_FIELDS, natural_key, observation_id
-from pipeline.schema.record import SCHEMA_VERSION, FareObservation, build_observation
+from pipeline.schema.record import (
+    SCHEMA_VERSION,
+    FareObservation,
+    build_observation,
+    with_quality,
+)
 from pipeline.schema.validation import (
     BatchReport,
+    InvalidBatchError,
     Violation,
     ViolationCode,
     validate,
     validate_batch,
+    validated_batch,
 )
 
 __all__ = [
@@ -33,6 +40,7 @@ __all__ = [
     "Cabin",
     "DataQuality",
     "FareObservation",
+    "InvalidBatchError",
     "PriceKind",
     "QualityFlag",
     "Source",
@@ -46,4 +54,6 @@ __all__ = [
     "table_to_records",
     "validate",
     "validate_batch",
+    "validated_batch",
+    "with_quality",
 ]

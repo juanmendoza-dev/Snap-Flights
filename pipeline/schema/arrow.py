@@ -14,6 +14,7 @@ from typing import Any
 import pyarrow as pa
 
 from pipeline.schema.record import FareObservation
+from pipeline.schema.validation import validated_batch
 
 FARE_OBSERVATION_ARROW_SCHEMA: pa.Schema = pa.schema(
     [
@@ -66,10 +67,13 @@ def records_to_table(records: Sequence[FareObservation]) -> pa.Table:
 
 
 def table_to_records(table: pa.Table) -> list[FareObservation]:
-    """Inverse. Raises on a schema mismatch rather than coercing."""
+    """Inverse. Raises on a schema mismatch rather than coercing, and revalidates every row
+    — including the logical id and schema version (review C1). Matching the physical schema
+    says the bytes are shaped right; it says nothing about whether the id recomputes from
+    the natural key it claims. Raises InvalidBatchError with the full report if not."""
     if not table.schema.equals(FARE_OBSERVATION_ARROW_SCHEMA, check_metadata=False):
         raise ValueError(
             "table schema does not match FARE_OBSERVATION_ARROW_SCHEMA:\n"
             f"expected:\n{FARE_OBSERVATION_ARROW_SCHEMA}\ngot:\n{table.schema}"
         )
-    return [FareObservation.model_validate(row) for row in table.to_pylist()]
+    return validated_batch(table.to_pylist())

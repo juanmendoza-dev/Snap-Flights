@@ -152,7 +152,7 @@ class FareObservation(BaseModel):
     currency: CurrencyCode
     price_kind: PriceKind
     data_quality: DataQuality = DataQuality.OK
-    quality_flags: list[QualityFlag] | None = None
+    quality_flags: tuple[QualityFlag, ...] | None = None
     ingest_run_id: str
     schema_version: SchemaVersion = SCHEMA_VERSION
 
@@ -196,6 +196,10 @@ Model construction does **not** compute `observation_id`. Producers call
 `observation_id(...)` and pass it in; `validate()` checks it matches. This keeps the model a
 dumb container and makes a wrong id detectable instead of silently self-healing.
 
+**Flags are a tuple (review C1).** A frozen model whose `quality_flags` is a `list` is not
+frozen: the list is mutable in place. Producers may still pass a list; the model stores a
+tuple.
+
 Convenience constructor, for adapters and the fixture generator:
 
 ```python
@@ -225,6 +229,24 @@ def build_observation(
     """Derive route_key and observation_id, then construct. The only sanctioned way to
     create a FareObservation from source data."""
 ```
+
+And the sanctioned way to stamp quality on a frozen record:
+
+```python
+def with_quality(
+    record: FareObservation,
+    *,
+    data_quality: DataQuality,
+    quality_flags: Sequence[QualityFlag] | None = None,
+) -> FareObservation:
+    """A revalidated copy carrying a new quality verdict (review C1)."""
+```
+
+SF-05 will stamp quality on records that are already built and frozen. `model_copy(update=)`
+skips every validator — a copy with `amount_minor=-1` validated clean and reached Parquet —
+so the copy is dumped and put back through the model. Field rules only: a record whose
+*fields* no longer validate cannot be stamped at all. Representing an invalid record so it
+can be quarantined is review S3's open question, owned by SF-05.
 
 ### 2.3 `pipeline/schema/identity.py` — canonicalisation, pinned
 
@@ -335,7 +357,26 @@ def validate(record: FareObservation | dict[str, object]) -> list[Violation]:
 
 def validate_batch(records: Iterable[FareObservation | dict[str, object]]) -> BatchReport:
     """Structured report with counts by violation type (SF-03 'What to build' §1)."""
+
+class InvalidBatchError(ValueError):
+    """A batch crossing a trust boundary contained invalid rows; carries the BatchReport."""
+    report: BatchReport
+
+def validated_batch(records: Iterable[FareObservation | dict[str, object]]) -> list[FareObservation]:
+    """Every row revalidated and rebuilt, or InvalidBatchError with the full report."""
+
+def logical_violations(record: FareObservation) -> list[Violation]:
+    """The id-recomputes and schema-version rules alone, for a record already built."""
 ```
+
+**A model instance is not evidence (review C1).** `validate()` used to check only the id and
+the schema version when handed a `FareObservation`, on the theory that construction had
+already enforced the rest. `model_copy(update=...)` and `model_construct()` both produce
+instances that never met a validator, so a copy with `amount_minor=-1` reported no
+violations, was written, came back as `-1` from `read_frame()` and raised from `read()`.
+Every entry point now revalidates from the record's own dumped field values, and
+`validated_batch()` is the shared trust boundary the store writes and canonical
+reconstruction both go through.
 
 The documented bad cases `validate()` must reject, one test each (§8):
 naive `fetched_at`; non-UTC `fetched_at`; lowercase or 2-letter IATA; lowercase currency;
@@ -412,6 +453,10 @@ string columns (`Unable to merge: Field source has incompatible types: string vs
 dictionary`). Keeping the columns in the file is the decision that makes inference redundant,
 so it is turned off rather than worked around.
 
+`table_to_records()` revalidates every row, id and schema version included (review C1):
+matching the physical schema says the bytes are shaped right, not that the id recomputes
+from the natural key it claims. It raises `InvalidBatchError`.
+
 ### 2.6 `shared/settings.py` — the single fixture-mode reader
 
 Read `SNAP_USE_FIXTURES` in exactly one place so `pipeline/`, `models/` and `api/` cannot
@@ -482,11 +527,12 @@ class SnapshotStore:
         """settings defaults to load_data_settings()."""
 
     def write(self, records: Sequence[FareObservation]) -> WriteResult:
-        """Group by (source, route_key, fetched_date); dedup within the batch on
-        observation_id keeping the LAST occurrence; write one
+        """Validate the whole batch, then group by (source, route_key, fetched_date);
+        dedup within the batch on observation_id keeping the LAST occurrence; write one
         part-{ingest_run_id}.parquet per group under the L0 §6 layout. Never rewrites
         or deletes an existing file: if the target path exists, a numeric suffix is
-        appended (part-{run}-002.parquet). Empty batch is a no-op returning zeros."""
+        appended (part-{run}-002.parquet). Empty batch is a no-op returning zeros.
+        Raises InvalidBatchError (carrying the BatchReport) if any record is invalid."""
 
     def read(self, filters: ReadFilters | None = None) -> list[FareObservation]:
         """Spec-literal path: canonical records. Convenience for tests and small reads.
@@ -515,6 +561,19 @@ class WriteResult:
 def default_store() -> SnapshotStore:
     """Process-wide store built from load_data_settings(). Cached."""
 ```
+
+**Validation is mandatory and comes first (review C1/C2).** `write()` is the store's trust
+boundary: every record is rebuilt from its own field values before anything is grouped,
+deduped or published, and an invalid batch raises `InvalidBatchError` before a single file
+lands. Arrow conversion of every group also happens before the first write — an int64
+overflow used to fail mid-publication with earlier partitions already on disk, and an
+append-only store cannot take those back.
+
+`read()` revalidates again on canonical reconstruction. `read_frame()` does **not**, and is
+not meant to: it is the bulk path, and revalidating a whole training scan row by row would
+defeat its purpose. The two agree on every row that came in through `write()`; a row planted
+under the store root by something other than the store is refused by `read()` and returned by
+`read_frame()`.
 
 `read()` and `read_frame()` share one DuckDB query built by a private
 `_build_query(filters) -> tuple[str, list[object]]`, so the two can never diverge. `read()`
@@ -902,6 +961,13 @@ Additional tests not tied to a Done-when bullet but required by this build spec:
 | `tests/schema/test_record.py::test_fetched_date_property` | UTC date of `fetched_at`, including a `23:30Z` case |
 | `tests/store/test_read.py::test_read_frame_schema_is_frozen` | the §6 column order and dtype table exactly |
 | `tests/store/test_read.py::test_read_matches_read_frame` | both paths return the same observation ids for the same filters |
+| `tests/store/test_write.py::test_write_rejects_a_negative_price_carried_in_by_model_copy` | review C1's reproduction: `InvalidBatchError`, nothing written |
+| `tests/store/test_write.py::test_write_rejects_a_record_whose_id_does_not_recompute` | wrong-id write refused |
+| `tests/store/test_write.py::test_write_rejects_an_overflowing_amount_before_publishing_anything` | no partial publication |
+| `tests/store/test_write.py::test_both_read_paths_agree_after_an_invalid_batch_is_refused` | the list/frame divergence is unreachable |
+| `tests/store/test_write.py::test_read_rejects_an_invalid_row_planted_under_the_store_root` | canonical reconstruction revalidates |
+| `tests/store/test_write.py::test_quality_flags_are_an_immutable_tuple` | frozen means frozen |
+| `tests/store/test_write.py::test_part_path_rejects_a_run_id_that_is_not_one_safe_segment` | review C2's traversal write |
 | `tests/fixtures/test_fixture_dataset.py::test_row_counts` | 162,000 calendar + 27,000 itinerary = 189,000 |
 | `tests/fixtures/test_fixture_dataset.py::test_fixture_today_matches_ci_snap_today` | `FIXTURE_TODAY.isoformat()` equals the `SNAP_TODAY` value in `.github/workflows/ci.yml`, and equals the maximum `fetched_date` in the committed parquet |
 | `tests/fixtures/test_fixture_dataset.py::test_route_csv_matches_l0_columns` | header and 15 rows exactly as §4.2 |
@@ -941,8 +1007,9 @@ per-cell counts as everyone else; what differs is which source the surviving row
 ## 9. Interfaces frozen for downstream (SF-06 and SF-07 may assume these)
 
 1. `from pipeline.schema import FareObservation, SCHEMA_VERSION, Source, TripType, Cabin,
-   PriceKind, DataQuality, QualityFlag, validate, validate_batch, observation_id,
-   build_observation` — all importable from the package root.
+   PriceKind, DataQuality, QualityFlag, validate, validate_batch, validated_batch,
+   InvalidBatchError, observation_id, build_observation, with_quality` — all importable from
+   the package root.
 2. `from pipeline.store import SnapshotStore, ReadFilters, default_store`.
 3. `SnapshotStore.read_frame(filters) -> pl.DataFrame` with **exactly** the columns, order
    and dtypes in §6, including for an empty result. This is the bulk path; SF-06 must not
@@ -962,7 +1029,9 @@ per-cell counts as everyone else; what differs is which source the surviving row
 9. `SnapshotStore.sources_with_recent_data(within_days, as_of)` exists and backs
    `GET /health`.
 10. `store.write()` never mutates or deletes an existing file, so a test that writes into a
-    `tmp_path` store cannot corrupt the fixtures.
+    `tmp_path` store cannot corrupt the fixtures. It validates the whole batch first and
+    raises `InvalidBatchError` rather than publishing any part of an invalid batch, so a
+    producer must be ready to catch it.
 11. "Today" comes from `shared.clock.today_utc()` / `now_utc()` and nowhere else (P0
     §Interfaces frozen 8). `sources_with_recent_data()` already defaults its `as_of` that
     way; SF-06 and SF-07 default theirs the same way rather than calling `date.today()` or

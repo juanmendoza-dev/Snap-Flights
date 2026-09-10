@@ -8,12 +8,22 @@
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from pydantic import ValidationError
 
-from pipeline.schema import PriceKind, Source
+from pipeline.schema import (
+    DataQuality,
+    FareObservation,
+    PriceKind,
+    QualityFlag,
+    Source,
+    ViolationCode,
+    with_quality,
+)
 from pipeline.schema.arrow import FARE_OBSERVATION_ARROW_SCHEMA
+from pipeline.store import InvalidBatchError
 from pipeline.store.paths import part_files, part_path, under_root
 
 from . import RUN_A, RUN_B, make_observation, store_at
@@ -211,3 +221,147 @@ def test_writing_a_traversing_run_id_is_impossible_end_to_end(tmp_path: Path) ->
         make_observation(ingest_run_id="x/../../../../../escaped")
 
     assert list(tmp_path.rglob("*.parquet")) == []
+
+
+# C1 — write is the trust boundary: a FareObservation instance proves nothing.
+
+
+def invalid_copy(**update: object) -> FareObservation:
+    """A valid record copied with an invalid field. model_copy runs no validators, so this
+    is a FareObservation instance that never met one."""
+    return make_observation().model_copy(update=update)
+
+
+def test_write_rejects_a_negative_price_carried_in_by_model_copy(tmp_path: Path) -> None:
+    """The C1 reproduction: validate() used to report nothing, the writer persisted -1,
+    read_frame() returned -1 and read() raised."""
+    store = store_at(tmp_path)
+
+    with pytest.raises(InvalidBatchError) as caught:
+        store.write([invalid_copy(amount_minor=-1)])
+
+    report = caught.value.report
+    assert report.invalid == 1
+    assert ViolationCode.NONPOSITIVE_AMOUNT in report.counts_by_code
+    assert part_files(store.snapshots_root) == []
+
+
+def test_write_rejects_a_record_whose_id_does_not_recompute(tmp_path: Path) -> None:
+    store = store_at(tmp_path)
+
+    with pytest.raises(InvalidBatchError) as caught:
+        store.write([invalid_copy(observation_id="0" * 16)])
+
+    assert ViolationCode.OBSERVATION_ID_MISMATCH in caught.value.report.counts_by_code
+    assert part_files(store.snapshots_root) == []
+
+
+def test_write_rejects_a_wrong_schema_version(tmp_path: Path) -> None:
+    store = store_at(tmp_path)
+
+    with pytest.raises(InvalidBatchError) as caught:
+        store.write([invalid_copy(schema_version=2)])
+
+    assert ViolationCode.BAD_SCHEMA_VERSION in caught.value.report.counts_by_code
+
+
+def test_write_rejects_an_overflowing_amount_before_publishing_anything(tmp_path: Path) -> None:
+    """2**63 used to pass validation and raise OverflowError inside pyarrow — after the
+    earlier partition groups of the same batch had already been written."""
+    store = store_at(tmp_path)
+    batch = [
+        make_observation(route_key="JFK-LHR"),
+        make_observation(route_key="LHR-JFK"),
+        invalid_copy(amount_minor=2**63),
+    ]
+
+    with pytest.raises(InvalidBatchError):
+        store.write(batch)
+
+    assert part_files(store.snapshots_root) == []
+    assert store.read() == []
+
+
+def test_the_report_covers_the_whole_batch_not_just_the_first_bad_row(tmp_path: Path) -> None:
+    store = store_at(tmp_path)
+    batch = [
+        make_observation(),
+        invalid_copy(amount_minor=-1),
+        invalid_copy(observation_id="0" * 16),
+    ]
+
+    with pytest.raises(InvalidBatchError) as caught:
+        store.write(batch)
+
+    report = caught.value.report
+    assert (report.total, report.valid, report.invalid) == (3, 1, 2)
+
+
+def test_both_read_paths_agree_after_an_invalid_batch_is_refused(tmp_path: Path) -> None:
+    """The list/frame divergence the review reproduced is unreachable once the write gate
+    is mandatory: neither path ever sees the row."""
+    store = store_at(tmp_path)
+    good = make_observation()
+    store.write([good])
+
+    with pytest.raises(InvalidBatchError):
+        store.write([invalid_copy(amount_minor=-1)])
+
+    records = store.read()
+    frame = store.read_frame()
+    assert [record.observation_id for record in records] == frame["observation_id"].to_list()
+    assert [record.amount_minor for record in records] == frame["amount_minor"].to_list()
+    assert records == [good]
+
+
+def test_read_rejects_an_invalid_row_planted_under_the_store_root(tmp_path: Path) -> None:
+    """Nothing can write this through the store, so plant it directly: canonical
+    reconstruction revalidates and refuses it, with the full report."""
+    store = store_at(tmp_path)
+    store.write([make_observation()])
+    planted = part_files(store.snapshots_root)[0]
+    table = pq.read_table(planted, schema=FARE_OBSERVATION_ARROW_SCHEMA)
+    corrupted = table.set_column(
+        table.column_names.index("observation_id"),
+        table.schema.field("observation_id"),
+        pa.array(["0" * 16] * table.num_rows, type=pa.string()),
+    )
+    pq.write_table(corrupted, planted.with_name("part-planted.parquet"))
+
+    with pytest.raises(InvalidBatchError) as caught:
+        store.read()
+
+    assert ViolationCode.OBSERVATION_ID_MISMATCH in caught.value.report.counts_by_code
+    # read_frame() is the bulk path and trusts the write gate, so it still returns the row.
+    assert store.read_frame().height == 2
+
+
+def test_quality_flags_are_an_immutable_tuple() -> None:
+    """A frozen model with a mutable list is not frozen. SF-05 stamps flags on these."""
+    record = with_quality(
+        make_observation(),
+        data_quality=DataQuality.SUSPECT,
+        quality_flags=[QualityFlag.PRICE_BELOW_FLOOR],
+    )
+
+    assert record.quality_flags == (QualityFlag.PRICE_BELOW_FLOOR,)
+    with pytest.raises(AttributeError):
+        record.quality_flags.append(QualityFlag.STALE_SOURCE_PRICE)  # type: ignore[union-attr]
+
+
+def test_with_quality_revalidates_and_write_accepts_the_result(tmp_path: Path) -> None:
+    store = store_at(tmp_path)
+    stamped = with_quality(
+        make_observation(),
+        data_quality=DataQuality.SUSPECT,
+        quality_flags=[QualityFlag.PRICE_BELOW_FLOOR],
+    )
+
+    store.write([stamped])
+
+    assert store.read() == [stamped]
+    with pytest.raises(ValidationError):
+        with_quality(
+            make_observation().model_copy(update={"amount_minor": -1}),
+            data_quality=DataQuality.REJECTED,
+        )
