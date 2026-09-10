@@ -45,7 +45,9 @@ config/.gitkeep                      # config/ exists before SF-06 writes baseli
 data/fixtures/.gitkeep               # replaced by real fixtures in SF-03
 web/.gitkeep                         # deferred (D3) — directory exists, stays empty
 tests/__init__.py                    # namespace only
-tests/conftest.py                    # repo-root path fixture + SNAP_USE_FIXTURES isolation
+conftest.py                          # repo-root: path fixture, SNAP_USE_FIXTURES isolation,
+                                     #   offline guard (moved out of tests/, review C5)
+tests/conftest.py                    # a pointer to the root conftest
 tests/test_scaffold.py               # asserts the layout + tooling contract
 ```
 
@@ -96,7 +98,8 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tests"]
+# L0 §1: cross-cutting tests in tests/, unit tests beside the code they test (review C5).
+testpaths = ["tests", "pipeline", "models", "api", "shared", "scripts"]
 addopts = "-q --strict-markers"
 markers = [
     "slow: takes more than a second (fixture regeneration, backtest)",
@@ -223,8 +226,16 @@ whichever ISO spellings a given Python version happens to accept.
 functions read the environment on every call, which is what lets a test `monkeypatch.setenv`
 the pin without reloading modules.
 
+**Discovery must reach adjacent tests (review C5).** L0 §1 says unit tests live beside the
+code they test, but `testpaths = ["tests"]` never collected them: a future adapter's unit
+tests would have been silently uncollected by the standard `pytest` command, and a green run
+would have proved nothing about them. `tests/test_scaffold.py::test_adjacent_unit_tests_are_
+collected` writes a probe test beside `pipeline/schema/`, asserts a bare `pytest
+--collect-only` finds it, runs it, and removes it — so the list above is checked rather than
+assumed.
+
 ```python
-# tests/conftest.py
+# conftest.py  (repository root)
 import pytest
 from pathlib import Path
 
@@ -236,7 +247,21 @@ def _clean_fixture_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Delete SNAP_USE_FIXTURES from the environment before every test so a test
     that wants fixture mode must opt in explicitly. Prevents CI's job-level
     SNAP_USE_FIXTURES=1 from silently changing unit-test behaviour."""
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_outbound_network() -> Iterator[None]:
+    """socket.connect / connect_ex raise for anything but loopback, for the whole
+    session (review C5)."""
 ```
+
+**The suite runs offline (review C5).** "The tests make no external calls" was prose: nothing
+enforced it, the workflow does not deny egress, and this project does not get to assume a
+GitHub-hosted runner has none. An accidental live adapter call would otherwise pass CI,
+quietly depend on a third party and spend real API budget. Loopback and AF_UNIX stay open,
+because DuckDB, pyarrow and a FastAPI `TestClient` may legitimately use them — SF-07's
+`test_no_outbound_socket` no longer has to choose between a fragile monkeypatch and trusting
+the runner. **Limit:** a test that shells out runs in a process the patch does not reach
+(fixture regeneration and the id-stability check are the current examples).
 
 **`SNAP_TODAY` is deliberately *not* stripped here.** It is a determinism pin, not a mode
 switch: tests anchored to the fixture calendar (`/health` recency, `depart_date` validation)
@@ -316,8 +341,10 @@ SF-03 (and everything after) may assume, without re-checking:
 4. `config/` exists and is empty; a spec that needs a config file creates it.
 5. `scripts/validate_fixtures.py` exists with `main(argv) -> int` and is already wired into
    CI. SF-03 fills its body; it does not touch `.github/workflows/ci.yml`.
-6. `tests/conftest.py` provides `repo_root` and unsets `SNAP_USE_FIXTURES` before every
-   test. A test that needs fixture mode sets it itself.
+6. The **repository-root** `conftest.py` provides `repo_root`, unsets `SNAP_USE_FIXTURES`
+   before every test, and blocks outbound sockets for the whole session. A test that needs
+   fixture mode sets it itself. It is at the root, not in `tests/`, because a conftest only
+   applies to its own directory downwards and unit tests live beside code (review C5).
 7. Line length is 100 and the ruff rule set is fixed. Code that fails `ruff check` fails CI.
 8. `shared.clock.today_utc()` / `now_utc()` are the only sanctioned source of "now". No
    module calls `date.today()` or `datetime.now()` directly. CI pins

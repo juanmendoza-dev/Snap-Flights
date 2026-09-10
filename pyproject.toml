@@ -33,7 +33,10 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tests"]
+# L0 §1: cross-cutting tests live in tests/, unit tests live beside the code they test.
+# testpaths = ["tests"] alone silently skipped every adjacent test; tests/test_scaffold.py
+# ::test_adjacent_unit_tests_are_collected proves this list actually reaches them.
+testpaths = ["tests", "pipeline", "models", "api", "shared", "scripts"]
 addopts = "-q --strict-markers"
 markers = [
     "slow: takes more than a second (fixture regeneration, backtest)",
